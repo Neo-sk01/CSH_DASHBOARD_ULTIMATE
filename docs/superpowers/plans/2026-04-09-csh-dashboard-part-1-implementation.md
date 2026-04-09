@@ -110,7 +110,7 @@
         └── page.test.tsx                     # Server-render smoke test
 ```
 
-## Review Patch: C1-C4 and S1-S5
+## Review Patch: C1-C4, S1-S6, and Remaining Doc Polish
 
 ### C1. Verify the real CDR wrapper and shared call identifier before scaffolding
 
@@ -191,6 +191,10 @@ This keeps a call in the day it started and prevents midnight straddle calls fro
 ### S5. Treat `queue_stats_daily.stats_date` as a Toronto-local business date, not a UTC-derived date
 
 The sync step now derives `dateKey` with `formatInTimeZone(..., 'America/Toronto', 'yyyy-MM-dd')`, and `queue_stats_daily.stats_date` is documented as the Toronto business date requested from Versature. Weekend exclusion for queue stats therefore operates on the same calendar basis as logical calls.
+
+### S6. Verify whether the raw CDR `id` is reliable before locking in `source_hash` as the long-term key
+
+Task 0 must also record whether the top-level CDR `id` field is populated on every sampled row. If it is reliable, switch the raw CDR upsert to use `external_id` as the conflict target and keep the derived hash only as a fallback/debug field. If it is not reliable, keep `source_hash` as the primary key and add a schema comment explaining that it is a derived fallback sensitive to payload-shape changes.
 
 ## Task 0: Verify Real Versature CDR Shape Before Scaffolding
 
@@ -376,12 +380,17 @@ Create `docs/versature-cdr-shape.md` with this exact structure, replacing the qu
 - Primary row array key: copy `rowArrayKey` exactly; use `<array-root>` if the payload itself is the row array
 - Shared call identifier field: choose the first `sharedIdCandidates` entry that shows repeated multi-segment groups across queue legs; otherwise write `none found`
 - Shared call identifier evidence: record the chosen candidate's `sampleGroups` summary so later workers can see whether it spans AA, queue, and answered legs
+- Raw CDR row identifier field: record whether top-level `id` is present on every sampled row; otherwise write `not reliably present`
 - Dedupe decision:
   - If a shared call identifier field was confirmed, use that exact field path in `getSharedCallId(...)` and keep caller number + Toronto-local minute bucket as the fallback.
   - If no shared identifier was confirmed, use caller number + Toronto-local minute bucket as the primary dedupe key.
+- Raw CDR identity decision:
+  - If top-level `id` is reliable on every sampled row, use `external_id` as the raw upsert conflict target and keep `source_hash` only as a derived fallback/debug field.
+  - If top-level `id` is not reliable, keep `source_hash` as the primary key and add a schema comment warning that it is a derived fallback sensitive to payload changes.
 - Follow-up edits required before Task 4 and Task 5 are implemented:
   - Update the `extractPagedItems(...)` test and implementation to match the verified wrapper shape from this document.
   - Update `VersatureCdr`, the logical-call fixtures, and `getSharedCallId(...)` to use the verified shared-id field path from this document.
+  - Update the `cdr_segments` migration and raw CDR upsert conflict target to match the raw identity decision from this document.
 ```
 
 - [ ] **Step 4: Commit**
@@ -644,6 +653,8 @@ DNIS_SECONDARY=6135949199
 
 - [ ] **Step 2: Add the migration SQL**
 
+Before transcribing the migration below, read `docs/versature-cdr-shape.md` and adjust the `cdr_segments` conflict key if Task 0 confirmed that `external_id` is reliable on every row.
+
 Create `db/migrations/001_initial.sql`:
 
 ```sql
@@ -674,6 +685,9 @@ create table if not exists cdr_segments (
   payload jsonb not null,
   imported_at timestamptz not null default now()
 );
+
+comment on column cdr_segments.source_hash is
+  'Derived fallback key. If Task 0 confirms external_id is reliable on every row, use external_id as the long-term conflict target instead.';
 
 create index if not exists idx_cdr_segments_start_time on cdr_segments (start_time);
 create index if not exists idx_cdr_segments_to_id on cdr_segments (to_id);
@@ -1156,9 +1170,11 @@ Create `tests/versature/client.test.ts`:
 ```ts
 import { describe, expect, test, vi } from 'vitest'
 
+const invalidateAccessToken = vi.fn()
+
 vi.mock('@/lib/versature/auth', () => ({
   getAccessToken: vi.fn().mockResolvedValue('token-1'),
-  invalidateAccessToken: vi.fn(),
+  invalidateAccessToken,
 }))
 
 describe('versatureFetch', () => {
@@ -1175,6 +1191,7 @@ describe('versatureFetch', () => {
 
     expect(result).toEqual({ ok: true })
     expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(invalidateAccessToken).toHaveBeenCalledTimes(1)
   })
 
   test('throws loudly when the retry also returns 401', async () => {
@@ -1190,6 +1207,7 @@ describe('versatureFetch', () => {
     await expect(versatureFetch('/call_queues/')).rejects.toThrow(
       'Versature request returned 401 twice for /call_queues/',
     )
+    expect(invalidateAccessToken).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -2748,6 +2766,8 @@ Expected: FAIL with missing module errors.
 
 - [ ] **Step 3: Implement the sync orchestrator**
 
+Before transcribing the snippet below, read `docs/versature-cdr-shape.md` and swap the raw CDR upsert conflict target away from `source_hash` if Task 0 confirmed that `external_id` is reliable on every row.
+
 Create `lib/versature/sync.ts`:
 
 ```ts
@@ -3296,12 +3316,26 @@ export default async function Page({ searchParams }: { searchParams: SearchParam
         <KpiCard label="French Incoming" value={String(data.kpi4.totalFrench)} />
         <KpiCard label="AI / Overflow Calls" value={String(data.kpi5.totalAi)} />
         <KpiCard label="% Dropped" value={`${(data.kpi6.rate * 100).toFixed(1)}%`} tone="bad" />
-        <KpiCard
-          label="Avg Call Length"
-          value="By Queue"
-          helper={data.kpi8.rows.map((row: { queue_id: string; average_seconds: number }) => `${row.queue_id}: ${formatDuration(row.average_seconds)}`).join(' · ')}
-        />
         <KpiCard label="Short Calls (&lt;10s)" value={String(data.shortCalls.totalShortCalls)} />
+      </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-5">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Avg Call Length by Queue</h2>
+            <p className="mt-1 text-sm text-slate-600">Queue-stats talk time, shown separately to keep all four queues readable.</p>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {data.kpi8.rows.map((row: { queue_id: string; average_seconds: number }) => (
+            <div key={row.queue_id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-500">{row.queue_id}</p>
+              <p className="mt-2 text-2xl font-semibold text-slate-900">
+                {formatDuration(row.average_seconds)}
+              </p>
+            </div>
+          ))}
+        </div>
       </section>
 
       <section className="grid gap-6 lg:grid-cols-2">
@@ -3376,6 +3410,27 @@ Create `README.md`:
 4. Run `npm install`.
 5. Run `npm run db:migrate`.
 
+## Net2Phone / Versature App Setup
+
+1. In the Net2Phone developer portal, create a new application for this internal dashboard.
+2. Enable the Client Credentials grant for that app.
+3. Copy the client ID and client secret into `.env.local`.
+4. Confirm the tenant's documented media type before overriding `VERSATURE_API_VERSION`.
+
+## Environment Variables
+
+- `VERSATURE_BASE_URL`: Versature API base URL for your tenant.
+- `VERSATURE_CLIENT_ID`: OAuth client ID for the dashboard integration.
+- `VERSATURE_CLIENT_SECRET`: OAuth client secret for the dashboard integration.
+- `VERSATURE_API_VERSION`: Accept header media type. Leave the default unless your tenant documents a newer one.
+- `DATABASE_URL`: PostgreSQL connection string for the local dashboard database.
+- `QUEUE_ENGLISH`: English queue ID.
+- `QUEUE_FRENCH`: French queue ID.
+- `QUEUE_AI_OVERFLOW_EN`: English AI overflow queue ID.
+- `QUEUE_AI_OVERFLOW_FR`: French AI overflow queue ID.
+- `DNIS_PRIMARY`: Primary tracked CSH DNIS.
+- `DNIS_SECONDARY`: Secondary tracked CSH DNIS.
+
 ## Run
 
 - `npm run dev` starts the local dashboard.
@@ -3386,13 +3441,17 @@ Create `README.md`:
 
 `POST /api/refresh` syncs a day of data from Versature into PostgreSQL.
 
+## Metric Notes
+
+- Short Calls is a caller-engagement metric. It counts quick DNIS-touching answered segments, including auto-attendant-answered edges, and must not be reinterpreted as a human-answered-only metric.
+
 ## Troubleshooting
 
 If numbers look wrong, check these first:
 
-1. Are you counting raw CDRs instead of logical calls?
-2. Are you filtering by `call_type === 'Incoming'` instead of DNIS or queue stats?
-3. Are you treating `answer_time` as proof that a human answered?
+1. Are you counting raw CDRs instead of logical calls? Re-run the audit script and compare the logical-call total to the raw segment total before trusting KPI #1.
+2. Are you filtering by `call_type === 'Incoming'` instead of DNIS or queue stats? Use DNIS-filtered logical calls for KPI #1 and queue stats for queue-offered totals.
+3. Are you treating `answer_time` as proof that a human answered? Use queue stats `abandoned_calls` for dropped-call reporting, and treat `answer_time` only as an input for duration-oriented metrics.
 ```
 
 - [ ] **Step 2: Run the full test suite**

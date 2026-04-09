@@ -132,6 +132,7 @@ PostgreSQL is the single source of truth for Part 1.
 `cdr_segments`
 - Raw CDR rows from `GET /cdrs/users/`
 - Stores original payload plus normalized columns used for filtering and grouping
+- Must prefer the verified Versature row `id` as the source identifier if Task 0 confirms it is reliably present on every segment; otherwise retain a documented derived-hash fallback
 
 `queue_stats_daily`
 - One row per queue per day
@@ -167,11 +168,16 @@ PostgreSQL is the single source of truth for Part 1.
 
 After raw CDR persistence, the app rebuilds affected `logical_calls` rows.
 
-The dedupe strategy is fixed and must be documented in code comments:
+The logical-call grouping strategy must be verified against one real historical day before implementation. That preflight must confirm both the actual CDR page wrapper and whether Versature exposes a shared call identifier across AA, queue, and answered legs.
 
-- group candidate segments by originating call start time plus caller number
-- restrict KPI #1 to calls touching the tracked DNIS values
-- choose the first DNIS-touching segment as the representative row for the real-world call
+Once that verification is written down in `docs/versature-cdr-shape.md`, logical-call derivation must follow these rules:
+
+- use the verified shared call identifier as the primary dedupe key when one exists across segments
+- otherwise fall back to caller number plus a Toronto-local minute bucket
+- restrict KPI #1 to groups touching the tracked DNIS values
+- use the DNIS-touching segment only to label the tracked DNIS
+- derive `answered` from whether any segment in the group has `answer_time`
+- derive `duration_seconds` from the longest answered segment, or from the longest segment overall if none were answered
 
 This is the mechanism that protects the dashboard from the "CDRs are not calls" failure mode.
 
@@ -241,8 +247,9 @@ Separate operational metric:
 - answered CDRs only
 - `duration < 10`
 - DNIS-filtered
+- caller-engagement metric, not a human-answered-only metric
 
-It must not be merged into dropped calls.
+It must not be merged into dropped calls, and the README must explicitly warn future maintainers not to "fix" the auto-attendant edge case by turning this into a human-answer metric.
 
 ## Date and Business Rules
 
@@ -263,11 +270,13 @@ Single-page dashboard with four vertical regions:
    - weekend toggle
 
 2. KPI card grid
-   - KPIs 1-8
+   - KPIs 1-7
    - Short Calls card as required operational companion metric
    - small delta vs prior equivalent period where practical
+   - inline KPI #1 warning when logical-call and queue-stats methods drift
 
 3. Charts row
+   - Avg Call Length by Queue as its own multi-row panel
    - Language Split donut
    - Day-of-Week bar chart for month view
    - Hourly Duration line chart
@@ -321,13 +330,13 @@ Add tests that exercise the Postgres-backed normalization path to prove the pers
 `README.md` must include:
 
 - local setup
-- env var list
+- env var list with a short purpose note for each variable
 - how to create the Net2Phone developer app with client-credentials grant
 - how to run local Postgres
 - how to sync data
 - how to run queue discovery
 - how to run day-level audit validation
-- troubleshooting checklist naming all three core counting pitfalls
+- troubleshooting checklist naming all three core counting pitfalls and the corrective action for each one
 
 `.env.local.example` must contain placeholders only, never real secrets.
 
@@ -355,10 +364,11 @@ Part 1 is complete only when all of the following are true:
 
 The next step after user review of this spec is to create a written implementation plan, then execute Part 1 top-to-bottom:
 
-1. scaffold app and database foundation
-2. build Versature auth/client layer
-3. implement and test KPI #1 first
-4. implement remaining KPIs in order
-5. build UI
-6. run manual audit on a real day
-7. stop for human validation before Part 2
+1. verify the real CDR wrapper, shared call identifier, and raw row identifier on a historical day
+2. scaffold app and database foundation
+3. build Versature auth/client layer
+4. implement and test KPI #1 first
+5. implement remaining KPIs in order
+6. build UI
+7. run manual audit on a real day
+8. stop for human validation before Part 2
