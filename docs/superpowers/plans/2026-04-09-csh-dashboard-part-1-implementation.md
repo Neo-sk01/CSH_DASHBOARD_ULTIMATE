@@ -21,6 +21,8 @@
 ├── .gitignore                                # Ignore node_modules, .next, .env.local
 ├── .env.local.example                        # Part 1 env template
 ├── README.md                                 # Setup, run, audit, troubleshooting
+├── docs/
+│   └── versature-cdr-shape.md                # Verified CDR response shape + dedupe decision
 ├── app/
 │   ├── globals.css                           # Tailwind entry + global styles
 │   ├── layout.tsx                            # Root layout shell
@@ -71,6 +73,7 @@
 │       ├── dates.ts                          # ET date boundaries + comparisons
 │       └── format.ts                         # Duration and percent formatting
 ├── scripts/
+│   ├── inspect-cdr-shape.mjs                 # Real-data preflight verifier
 │   ├── migrate.ts                            # Run SQL migrations
 │   ├── discover-queues.ts                    # Queue discovery helper
 │   └── audit-day.ts                          # Human validation helper
@@ -105,6 +108,289 @@
     │   └── get-dashboard-data.test.ts
     └── app/
         └── page.test.tsx                     # Server-render smoke test
+```
+
+## Review Patch: C1-C4 and S1-S5
+
+### C1. Verify the real CDR wrapper and shared call identifier before scaffolding
+
+The plan no longer assumes `start_time + caller_number` is enough to dedupe segments, and it no longer assumes the pagination wrapper uses `results`. Before Task 1 starts, run a one-day inspection against the real Versature API and record:
+
+- the top-level page wrapper keys
+- whether a shared call identifier exists across segments
+- which field path carries it
+- whether that identifier is stable across AA, queue, and answered legs
+
+The implementation plan now adds `Task 0` for this preflight and writes the result to `docs/versature-cdr-shape.md`. No KPI or logical-call code should be implemented until this artifact exists.
+
+### C2. Compute `answered` and `durationSeconds` from the whole segment group, not the DNIS leg
+
+`logical_calls.answered` must be derived from the full group:
+
+```ts
+const answered = rows.some((row) => row.answer_time !== null)
+const durationSeconds = answered
+  ? Math.max(...rows.filter((row) => row.answer_time !== null).map((row) => row.duration))
+  : Math.max(...rows.map((row) => row.duration))
+```
+
+The representative DNIS-touching segment still determines the tracked DNIS for KPI #1, but it does not determine the answered flag or conversation duration.
+
+### C3. Expand the OAuth tests to cover expiry refresh and double-401 failure
+
+The auth/client test plan now includes three required paths:
+
+1. cached token reuse before expiry
+2. refresh after expiry
+3. API request gets 401, invalidates, retries once, then throws loudly if the retry also gets 401
+
+### C4. Default `VERSATURE_API_VERSION` to `application/vnd.integrate.v1.6.0+json`
+
+The plan no longer assumes `v1.10.0`. The env template and default header now use `v1.6.0`, matching the approved spec. A comment in `.env.local.example` points operators to override it only if their tenant is on a documented newer version.
+
+### S1. Remove the `null` sentinel from `versatureFetch`
+
+The retry path now uses a typed `UnauthorizedOnceError` instead of overloading `null`:
+
+```ts
+class UnauthorizedOnceError extends Error {}
+```
+
+This prevents a legitimate `null` API payload from being misread as an auth failure.
+
+### S2. Extract paginated rows through a verified helper
+
+The page-wrapping logic is no longer hardcoded to `payload.results`. The plan now uses:
+
+```ts
+function extractPagedItems<T>(payload: unknown): { items: T[]; more: boolean; cursor?: string }
+```
+
+This helper is populated only after Task 0 verifies the real response shape.
+
+### S3. Replace logical calls by explicit business date, even when the replacement set is empty
+
+The old `rows[0]?.callDate` delete path is removed. The query helper now takes the date as an explicit argument:
+
+```ts
+replaceLogicalCallsForDate(client, dateKey, rows)
+```
+
+This guarantees a legitimate zero-call day clears stale rows instead of leaving old data behind.
+
+### S4. Count calls by `start_time`, not `end_time`
+
+KPI #1 period filters now use:
+
+```sql
+where start_time >= $1 and start_time <= $2
+```
+
+This keeps a call in the day it started and prevents midnight straddle calls from disappearing from both days.
+
+### S5. Treat `queue_stats_daily.stats_date` as a Toronto-local business date, not a UTC-derived date
+
+The sync step now derives `dateKey` with `formatInTimeZone(..., 'America/Toronto', 'yyyy-MM-dd')`, and `queue_stats_daily.stats_date` is documented as the Toronto business date requested from Versature. Weekend exclusion for queue stats therefore operates on the same calendar basis as logical calls.
+
+## Task 0: Verify Real Versature CDR Shape Before Scaffolding
+
+**Files:**
+- Create: `/Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard/scripts/inspect-cdr-shape.mjs`
+- Create: `/Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard/docs/versature-cdr-shape.md`
+
+- [ ] **Step 1: Write the inspection script**
+
+Create `scripts/inspect-cdr-shape.mjs`:
+
+```js
+const baseUrl = process.env.VERSATURE_BASE_URL
+const clientId = process.env.VERSATURE_CLIENT_ID
+const clientSecret = process.env.VERSATURE_CLIENT_SECRET
+const apiVersion =
+  process.env.VERSATURE_API_VERSION ?? 'application/vnd.integrate.v1.6.0+json'
+const date = process.argv[2]
+
+if (!date) {
+  throw new Error('Usage: node --env-file=.env.local scripts/inspect-cdr-shape.mjs 2026-04-01')
+}
+
+function getValueAtPath(value, path) {
+  return path.split('.').reduce((current, key) => {
+    if (!current || typeof current !== 'object') {
+      return null
+    }
+
+    return current[key] ?? null
+  }, value)
+}
+
+function findPrimaryRowArray(payload) {
+  if (Array.isArray(payload)) {
+    return { rowArrayKey: '<array-root>', rows: payload }
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Expected the CDR payload to be an object or array')
+  }
+
+  const arrayEntries = Object.entries(payload).filter(([, value]) => Array.isArray(value))
+  const objectArrayEntries = arrayEntries.filter(([, value]) =>
+    value.every((item) => item && typeof item === 'object' && !Array.isArray(item)),
+  )
+
+  if (objectArrayEntries.length === 1) {
+    return {
+      rowArrayKey: objectArrayEntries[0][0],
+      rows: objectArrayEntries[0][1],
+    }
+  }
+
+  if (arrayEntries.length === 1) {
+    return {
+      rowArrayKey: arrayEntries[0][0],
+      rows: arrayEntries[0][1],
+    }
+  }
+
+  throw new Error(
+    `Unable to identify the primary row array. Top-level keys: ${Object.keys(payload).join(', ')}`,
+  )
+}
+
+function inspectSharedIdCandidates(rows) {
+  const candidatePaths = [
+    'call_id',
+    'from.call_id',
+    'callId',
+    'from.callId',
+    'session_id',
+    'conversation_id',
+  ]
+
+  return candidatePaths
+    .map((path) => {
+      const groups = new Map()
+
+      for (const row of rows) {
+        const value = getValueAtPath(row, path)
+        if (typeof value !== 'string' || value.length === 0) {
+          continue
+        }
+
+        const bucket = groups.get(value) ?? {
+          count: 0,
+          toIds: new Set(),
+          answeredRows: 0,
+        }
+
+        bucket.count += 1
+        bucket.toIds.add(getValueAtPath(row, 'to.id') ?? '<missing>')
+        if (getValueAtPath(row, 'answer_time')) {
+          bucket.answeredRows += 1
+        }
+
+        groups.set(value, bucket)
+      }
+
+      const multiSegmentGroups = [...groups.entries()]
+        .filter(([, group]) => group.count > 1)
+        .slice(0, 5)
+        .map(([value, group]) => ({
+          value,
+          count: group.count,
+          uniqueToIds: [...group.toIds],
+          answeredRows: group.answeredRows,
+        }))
+
+      return {
+        path,
+        populatedRows: [...groups.values()].reduce((sum, group) => sum + group.count, 0),
+        multiSegmentGroups: multiSegmentGroups.length,
+        sampleGroups: multiSegmentGroups,
+      }
+    })
+    .filter((candidate) => candidate.populatedRows > 0)
+}
+
+const tokenResponse = await fetch(`${baseUrl}/oauth/token/`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: clientId,
+    client_secret: clientSecret,
+  }),
+})
+
+const tokenPayload = await tokenResponse.json()
+const accessToken = tokenPayload.access_token
+
+const cdrResponse = await fetch(
+  `${baseUrl}/cdrs/users/?start_date=${date}&end_date=${date}`,
+  {
+    headers: {
+      Accept: apiVersion,
+      Authorization: `Bearer ${accessToken}`,
+    },
+  },
+)
+
+const payload = await cdrResponse.json()
+const pageKeys = Array.isArray(payload) ? ['<array-root>'] : Object.keys(payload)
+const { rowArrayKey, rows } = findPrimaryRowArray(payload)
+const firstRow = rows[0] ?? null
+const sampleRows = rows.slice(0, 50)
+
+console.log(JSON.stringify({
+  pageKeys,
+  rowArrayKey,
+  rowCount: rows.length,
+  firstRowKeys: firstRow ? Object.keys(firstRow) : [],
+  firstRow,
+  sharedIdCandidates: inspectSharedIdCandidates(sampleRows),
+}, null, 2))
+```
+
+- [ ] **Step 2: Run the inspection script against a real historical day**
+
+Run:
+
+```bash
+cd /Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard
+node --env-file=.env.local scripts/inspect-cdr-shape.mjs 2026-04-01
+```
+
+Expected: a JSON blob showing the top-level page keys and the first real CDR row.
+The output must also include `rowArrayKey` and a `sharedIdCandidates` array so the next worker can choose a primary dedupe field based on real data instead of assumptions.
+
+- [ ] **Step 3: Write the verified findings**
+
+Create `docs/versature-cdr-shape.md` with this exact structure, replacing the quoted values with the real script output from Step 2:
+
+```md
+# Versature CDR Shape Verification
+
+- Inspection date: 2026-04-09
+- Sample day checked: 2026-04-01
+- Page wrapper keys: copy the exact JSON array from `pageKeys`
+- Primary row array key: copy `rowArrayKey` exactly; use `<array-root>` if the payload itself is the row array
+- Shared call identifier field: choose the first `sharedIdCandidates` entry that shows repeated multi-segment groups across queue legs; otherwise write `none found`
+- Shared call identifier evidence: record the chosen candidate's `sampleGroups` summary so later workers can see whether it spans AA, queue, and answered legs
+- Dedupe decision:
+  - If a shared call identifier field was confirmed, use that exact field path in `getSharedCallId(...)` and keep caller number + Toronto-local minute bucket as the fallback.
+  - If no shared identifier was confirmed, use caller number + Toronto-local minute bucket as the primary dedupe key.
+- Follow-up edits required before Task 4 and Task 5 are implemented:
+  - Update the `extractPagedItems(...)` test and implementation to match the verified wrapper shape from this document.
+  - Update `VersatureCdr`, the logical-call fixtures, and `getSharedCallId(...)` to use the verified shared-id field path from this document.
+```
+
+- [ ] **Step 4: Commit**
+
+Run:
+
+```bash
+git add scripts/inspect-cdr-shape.mjs docs/versature-cdr-shape.md
+git commit -m "docs: verify versature cdr wrapper and dedupe field"
 ```
 
 ## Task 1: Manually Scaffold the Greenfield Next.js App
@@ -339,7 +625,8 @@ Create `.env.local.example`:
 VERSATURE_BASE_URL=https://integrate.versature.com/api
 VERSATURE_CLIENT_ID=
 VERSATURE_CLIENT_SECRET=
-VERSATURE_API_VERSION=application/vnd.integrate.v1.10.0+json
+# Override only if your tenant is on a newer documented media type.
+VERSATURE_API_VERSION=application/vnd.integrate.v1.6.0+json
 
 # PostgreSQL
 DATABASE_URL=postgres://username:password@127.0.0.1:5432/csh_dashboard
@@ -403,6 +690,9 @@ create table if not exists queue_stats_daily (
   imported_at timestamptz not null default now(),
   primary key (queue_id, stats_date)
 );
+
+comment on column queue_stats_daily.stats_date is
+  'America/Toronto business date requested from Versature; do not treat as UTC-derived';
 
 create table if not exists queue_splits (
   queue_id text not null,
@@ -802,9 +1092,12 @@ describe('getAccessToken', () => {
   beforeEach(() => {
     fetchMock.mockReset()
     vi.resetModules()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-04-09T12:00:00Z'))
     process.env.VERSATURE_CLIENT_ID = 'client'
     process.env.VERSATURE_CLIENT_SECRET = 'secret'
     process.env.VERSATURE_BASE_URL = 'https://integrate.versature.com/api'
+    process.env.VERSATURE_API_VERSION = 'application/vnd.integrate.v1.6.0+json'
   })
 
   test('caches the token until the safety margin is reached', async () => {
@@ -825,6 +1118,35 @@ describe('getAccessToken', () => {
     expect(first).toBe('abc')
     expect(second).toBe('abc')
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  test('refreshes the token after the expiry safety margin is reached', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          access_token: 'token-1',
+          token_type: 'Bearer',
+          scope: 'Office Manager',
+          expires_in: 120,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          access_token: 'token-2',
+          token_type: 'Bearer',
+          scope: 'Office Manager',
+          expires_in: 120,
+        }),
+      })
+
+    const { getAccessToken } = await import('@/lib/versature/auth')
+
+    expect(await getAccessToken()).toBe('token-1')
+    vi.advanceTimersByTime(61_000)
+    expect(await getAccessToken()).toBe('token-2')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
 ```
@@ -853,6 +1175,39 @@ describe('versatureFetch', () => {
 
     expect(result).toEqual({ ok: true })
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  test('throws loudly when the retry also returns 401', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 401, text: async () => 'nope' })
+      .mockResolvedValueOnce({ ok: false, status: 401, text: async () => 'still nope' })
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { versatureFetch } = await import('@/lib/versature/client')
+
+    await expect(versatureFetch('/call_queues/')).rejects.toThrow(
+      'Versature request returned 401 twice for /call_queues/',
+    )
+  })
+})
+
+describe('extractPagedItems', () => {
+  test('normalizes a verified wrapper shape into rows and cursor metadata', async () => {
+    const { extractPagedItems } = await import('@/lib/versature/client')
+
+    expect(
+      extractPagedItems<{ id: string }>({
+        results: [{ id: 'cdr-1' }],
+        more: false,
+        cursor: null,
+      }),
+    ).toEqual({
+      items: [{ id: 'cdr-1' }],
+      more: false,
+      cursor: null,
+    })
   })
 })
 ```
@@ -900,11 +1255,14 @@ Expected: FAIL with missing module errors.
 
 - [ ] **Step 3: Implement the auth, client, and endpoint files**
 
+Before transcribing the snippets below, read `docs/versature-cdr-shape.md` and replace any wrapper-key assumptions in the `extractPagedItems(...)` test and implementation if the verified tenant shape differs from the example here.
+
 Create `lib/versature/types.ts`:
 
 ```ts
 export type VersatureCdr = {
   id?: string
+  call_id?: string | null
   call_type?: string
   start_time: string
   answer_time: string | null
@@ -914,10 +1272,12 @@ export type VersatureCdr = {
     name?: string | null
     user?: string | null
     number?: string | null
+    call_id?: string | null
   }
   to: {
     id?: string | null
   }
+  [key: string]: unknown
 }
 
 export type QueueStats = {
@@ -984,11 +1344,44 @@ Create `lib/versature/client.ts`:
 ```ts
 import { getAccessToken, invalidateAccessToken } from './auth'
 
+class UnauthorizedOnceError extends Error {}
+
 function buildHeaders(token: string) {
   return {
-    Accept: process.env.VERSATURE_API_VERSION ?? 'application/vnd.integrate.v1.10.0+json',
+    Accept: process.env.VERSATURE_API_VERSION ?? 'application/vnd.integrate.v1.6.0+json',
     Authorization: `Bearer ${token}`,
   }
+}
+
+export function extractPagedItems<T>(payload: unknown): {
+  items: T[]
+  more: boolean
+  cursor: string | null
+} {
+  if (Array.isArray(payload)) {
+    return { items: payload as T[], more: false, cursor: null }
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Versature page payload was not an object or array')
+  }
+
+  const page = payload as {
+    results?: T[]
+    cdrs?: T[]
+    more?: boolean
+    cursor?: string | null
+  }
+
+  if (Array.isArray(page.results)) {
+    return { items: page.results, more: Boolean(page.more), cursor: page.cursor ?? null }
+  }
+
+  if (Array.isArray(page.cdrs)) {
+    return { items: page.cdrs, more: Boolean(page.more), cursor: page.cursor ?? null }
+  }
+
+  throw new Error('Unable to find a row array in the Versature page payload')
 }
 
 export async function versatureFetch(path: string) {
@@ -1003,37 +1396,48 @@ export async function versatureFetch(path: string) {
     }
 
     if (response.status === 401) {
-      return null
+      throw new UnauthorizedOnceError(`401 from ${path}`)
     }
 
     throw new Error(`Versature request failed (${response.status}) for ${path}`)
   }
 
-  const first = await attempt()
-  if (first !== null) return first
+  try {
+    return await attempt()
+  } catch (error) {
+    if (!(error instanceof UnauthorizedOnceError)) {
+      throw error
+    }
+  }
 
   invalidateAccessToken()
 
-  const second = await attempt()
-  if (second !== null) return second
+  try {
+    return await attempt()
+  } catch (error) {
+    if (error instanceof UnauthorizedOnceError) {
+      throw new Error(`Versature request returned 401 twice for ${path}`)
+    }
 
-  throw new Error(`Versature request returned 401 twice for ${path}`)
+    throw error
+  }
 }
 
 export async function fetchAllPages<T>(path: string) {
   const rows: T[] = []
-  let cursor = ''
+  let cursor: string | null = null
 
   while (true) {
     const query = cursor ? `${path}&cursor=${encodeURIComponent(cursor)}` : path
     const payload = await versatureFetch(query)
-    rows.push(...payload.results)
+    const page = extractPagedItems<T>(payload)
+    rows.push(...page.items)
 
-    if (!payload.more) {
+    if (!page.more) {
       return rows
     }
 
-    cursor = payload.cursor
+    cursor = page.cursor
   }
 }
 ```
@@ -1150,29 +1554,32 @@ Create `tests/fixtures/kpi-fixtures.ts`:
 export const cdrFixtures = [
   {
     id: 'cdr-1-a',
+    call_id: 'call-1',
     start_time: '2026-04-01T13:00:00Z',
     answer_time: null,
     end_time: '2026-04-01T13:00:07Z',
     duration: 7,
-    from: { number: '+16135550001', user: null, name: 'Caller 1' },
+    from: { number: '+16135550001', user: null, name: 'Caller 1', call_id: 'call-1' },
     to: { id: '16135949199' },
   },
   {
     id: 'cdr-1-b',
-    start_time: '2026-04-01T13:00:00Z',
+    call_id: 'call-1',
+    start_time: '2026-04-01T13:00:04Z',
     answer_time: '2026-04-01T13:00:03Z',
     end_time: '2026-04-01T13:01:10Z',
     duration: 67,
-    from: { number: '+16135550001', user: null, name: 'Caller 1' },
+    from: { number: '+16135550001', user: null, name: 'Caller 1', call_id: 'call-1' },
     to: { id: '8020' },
   },
   {
     id: 'cdr-2-a',
+    call_id: 'call-2',
     start_time: '2026-04-01T14:00:00Z',
     answer_time: '2026-04-01T14:00:01Z',
     end_time: '2026-04-01T14:00:04Z',
     duration: 4,
-    from: { number: '+16135550002', user: null, name: 'Caller 2' },
+    from: { number: '+16135550002', user: null, name: 'Caller 2', call_id: 'call-2' },
     to: { id: '6135949199' },
   },
 ]
@@ -1186,12 +1593,40 @@ import { buildLogicalCalls } from '@/lib/versature/logical-calls'
 import { cdrFixtures } from '@/tests/fixtures/kpi-fixtures'
 
 describe('buildLogicalCalls', () => {
-  test('deduplicates multiple CDR segments into one logical call per start time and caller number', () => {
+  test('deduplicates multiple CDR segments into one logical call using the shared call id when present', () => {
     const logicalCalls = buildLogicalCalls(cdrFixtures)
 
     expect(logicalCalls).toHaveLength(2)
-    expect(logicalCalls[0].dedupeKey).toBe('2026-04-01T13:00:00Z|+16135550001')
+    expect(logicalCalls[0].dedupeKey).toBe('call-1')
     expect(logicalCalls[0].dnis).toBe('16135949199')
+    expect(logicalCalls[0].answered).toBe(true)
+    expect(logicalCalls[0].durationSeconds).toBe(67)
+  })
+
+  test('falls back to caller number plus Toronto-local minute bucket when no shared call id exists', () => {
+    const logicalCalls = buildLogicalCalls([
+      {
+        id: 'cdr-fallback-a',
+        start_time: '2026-04-01T13:00:02Z',
+        answer_time: null,
+        end_time: '2026-04-01T13:00:08Z',
+        duration: 8,
+        from: { number: '+16135550009', user: null, name: 'Caller 9' },
+        to: { id: '16135949199' },
+      },
+      {
+        id: 'cdr-fallback-b',
+        start_time: '2026-04-01T13:00:41Z',
+        answer_time: '2026-04-01T13:00:45Z',
+        end_time: '2026-04-01T13:01:20Z',
+        duration: 35,
+        from: { number: '+16135550009', user: null, name: 'Caller 9' },
+        to: { id: '8020' },
+      },
+    ])
+
+    expect(logicalCalls).toHaveLength(1)
+    expect(logicalCalls[0].dedupeKey).toContain('|+16135550009')
   })
 })
 ```
@@ -1223,10 +1658,13 @@ Expected: FAIL with missing module errors.
 
 - [ ] **Step 3: Implement the logical-call builder and query helpers**
 
+Before transcribing the snippets below, read `docs/versature-cdr-shape.md` and replace the `getSharedCallId(...)` field lookup and any logical-call fixture fields anywhere the verified shared identifier path differs from the example here.
+
 Create `lib/versature/logical-calls.ts`:
 
 ```ts
 import { createHash } from 'node:crypto'
+import { formatInTimeZone } from 'date-fns-tz'
 import type { VersatureCdr } from './types'
 import { TARGET_DNIS } from './queues'
 
@@ -1247,12 +1685,25 @@ function hashPayload(value: unknown) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
 
+function getSharedCallId(cdr: VersatureCdr) {
+  return cdr.call_id ?? cdr.from.call_id ?? null
+}
+
+function buildFallbackGroupKey(cdr: VersatureCdr) {
+  const callerNumber = cdr.from.number ?? 'unknown'
+  const localMinuteBucket = formatInTimeZone(
+    new Date(cdr.start_time),
+    'America/Toronto',
+    "yyyy-MM-dd'T'HH:mm",
+  )
+  return `${localMinuteBucket}|${callerNumber}`
+}
+
 export function buildLogicalCalls(cdrs: VersatureCdr[]): LogicalCall[] {
   const grouped = new Map<string, VersatureCdr[]>()
 
   for (const cdr of cdrs) {
-    const callerNumber = cdr.from.number ?? null
-    const key = `${cdr.start_time}|${callerNumber ?? 'unknown'}`
+    const key = getSharedCallId(cdr) ?? buildFallbackGroupKey(cdr)
     const rows = grouped.get(key) ?? []
     rows.push(cdr)
     grouped.set(key, rows)
@@ -1260,25 +1711,42 @@ export function buildLogicalCalls(cdrs: VersatureCdr[]): LogicalCall[] {
 
   return [...grouped.entries()]
     .map(([dedupeKey, rows]) => {
-      const representative = rows.find((row) =>
+      const dnisRepresentative = rows.find((row) =>
         TARGET_DNIS.includes(String(row.to.id) as never),
       )
 
-      if (!representative || !representative.to.id) {
+      if (!dnisRepresentative || !dnisRepresentative.to.id) {
         return null
       }
 
+      const answeredRows = rows.filter((row) => row.answer_time !== null)
+      const durationSeconds =
+        answeredRows.length > 0
+          ? Math.max(...answeredRows.map((row) => row.duration))
+          : Math.max(...rows.map((row) => row.duration))
+      const latestEndTime = rows
+        .map((row) => row.end_time)
+        .sort((left, right) => new Date(left).getTime() - new Date(right).getTime())
+        .at(-1)!
+
       return {
-        callDate: representative.start_time.slice(0, 10),
+        callDate: formatInTimeZone(
+          new Date(dnisRepresentative.start_time),
+          'America/Toronto',
+          'yyyy-MM-dd',
+        ),
         dedupeKey,
-        callerNumber: representative.from.number ?? null,
-        dnis: representative.to.id,
-        startTime: representative.start_time,
-        endTime: representative.end_time,
-        answered: representative.answer_time !== null,
-        durationSeconds: representative.duration,
-        representativeHash: hashPayload(representative),
-        payload: representative as Record<string, unknown>,
+        callerNumber: dnisRepresentative.from.number ?? null,
+        dnis: dnisRepresentative.to.id,
+        startTime: dnisRepresentative.start_time,
+        endTime: latestEndTime,
+        answered: rows.some((row) => row.answer_time !== null),
+        durationSeconds,
+        representativeHash: hashPayload(dnisRepresentative),
+        payload: {
+          representative: dnisRepresentative,
+          groupedSegmentCount: rows.length,
+        } as Record<string, unknown>,
       }
     })
     .filter((value): value is LogicalCall => value !== null)
@@ -1316,8 +1784,12 @@ export function buildUpsertQueueStatsStatement() {
   `
 }
 
-export async function insertLogicalCalls(client: PoolClient, rows: LogicalCallRow[]) {
-  await client.query('delete from logical_calls where call_date = $1', [rows[0]?.callDate])
+export async function replaceLogicalCallsForDate(
+  client: PoolClient,
+  callDate: string,
+  rows: LogicalCallRow[],
+) {
+  await client.query('delete from logical_calls where call_date = $1', [callDate])
 
   for (const row of rows) {
     await client.query(
@@ -1492,7 +1964,7 @@ export async function getLogicalCallCountForPeriod(
     `
       select count(*)::int as count
       from logical_calls
-      where start_time >= $1 and end_time <= $2
+      where start_time >= $1 and start_time <= $2
         and ($3::boolean or extract(isodow from start_time at time zone 'America/Toronto') between 1 and 5)
     `,
     [period.start.toISOString(), period.end.toISOString(), options.includeWeekends ?? false],
@@ -1506,6 +1978,7 @@ export async function getCallsOfferedForQueues(
   queueIds: string[],
   options: { includeWeekends?: boolean } = {},
 ) {
+  // stats_date is stored as the Toronto business date requested from Versature.
   const result = await getPool().query(
     `
       select coalesce(sum(calls_offered), 0)::int as count
@@ -1689,7 +2162,7 @@ describe('computeKpi5', () => {
 Run:
 
 ```bash
-npx vitest run tests/kpis/kpi-2-dropped.test.ts tests/kpis/short-calls.test.ts tests/kpis/kpi-6-pct-dropped.test.ts
+npx vitest run tests/kpis/kpi-2-dropped.test.ts tests/kpis/kpi-3-english.test.ts tests/kpis/kpi-4-french.test.ts tests/kpis/kpi-5-ai.test.ts tests/kpis/kpi-6-pct-dropped.test.ts tests/kpis/short-calls.test.ts
 ```
 
 Expected: FAIL with missing module errors.
@@ -1811,6 +2284,7 @@ export async function getAbandonedCallsForQueues(
   queueIds: string[],
   options: { includeWeekends?: boolean } = {},
 ) {
+  // stats_date is stored as the Toronto business date requested from Versature.
   const result = await getPool().query(
     `
       select coalesce(sum(abandoned_calls), 0)::int as count
@@ -1840,7 +2314,7 @@ export async function getShortAnsweredCallCount(
       select count(*)::int as count
       from cdr_segments
       where start_time >= $1
-        and end_time <= $2
+        and start_time <= $2
         and answer_time is not null
         and duration_seconds < $3
         and to_id = any($4::text[])
@@ -1864,7 +2338,7 @@ export async function getShortAnsweredCallCount(
 Run:
 
 ```bash
-npx vitest run tests/kpis/kpi-2-dropped.test.ts tests/kpis/short-calls.test.ts tests/kpis/kpi-6-pct-dropped.test.ts
+npx vitest run tests/kpis/kpi-2-dropped.test.ts tests/kpis/kpi-3-english.test.ts tests/kpis/kpi-4-french.test.ts tests/kpis/kpi-5-ai.test.ts tests/kpis/kpi-6-pct-dropped.test.ts tests/kpis/short-calls.test.ts
 ```
 
 Expected: PASS.
@@ -2008,7 +2482,7 @@ describe('computeKpi10', () => {
 Run:
 
 ```bash
-npx vitest run tests/kpis/kpi-7-language-split.test.ts tests/kpis/kpi-9-day-of-week.test.ts
+npx vitest run tests/kpis/kpi-7-language-split.test.ts tests/kpis/kpi-8-avg-length.test.ts tests/kpis/kpi-9-day-of-week.test.ts tests/kpis/kpi-10-hourly-length.test.ts
 ```
 
 Expected: FAIL with missing module errors.
@@ -2115,6 +2589,7 @@ export async function getAverageTalkTimes(
   period: { start: Date; end: Date },
   options: { includeWeekends?: boolean } = {},
 ) {
+  // stats_date is stored as the Toronto business date requested from Versature.
   const result = await getPool().query(
     `
       select queue_id, round(avg(average_talk_time))::int as average_seconds
@@ -2164,7 +2639,7 @@ export async function getAverageAnsweredDurationByHour(
              round(avg(duration_seconds))::int as average_seconds
       from cdr_segments
       where start_time >= $1
-        and end_time <= $2
+        and start_time <= $2
         and answer_time is not null
         and to_id = any($3::text[])
         and ($4::boolean or extract(isodow from start_time at time zone 'America/Toronto') between 1 and 5)
@@ -2207,7 +2682,7 @@ export async function getLastSuccessfulIngestAt() {
 Run:
 
 ```bash
-npx vitest run tests/kpis/kpi-7-language-split.test.ts tests/kpis/kpi-9-day-of-week.test.ts
+npx vitest run tests/kpis/kpi-7-language-split.test.ts tests/kpis/kpi-8-avg-length.test.ts tests/kpis/kpi-9-day-of-week.test.ts tests/kpis/kpi-10-hourly-length.test.ts
 ```
 
 Expected: PASS.
@@ -2277,11 +2752,11 @@ Create `lib/versature/sync.ts`:
 
 ```ts
 import { createHash } from 'node:crypto'
-import { format } from 'date-fns'
+import { formatInTimeZone } from 'date-fns-tz'
 import { getDomainCdrs, getQueueSplits, getQueueStats } from './endpoints'
 import { AI_OVERFLOW_QUEUE_IDS, ENGLISH_QUEUE_ID, FRENCH_QUEUE_ID } from './queues'
 import { buildLogicalCalls } from './logical-calls'
-import { withTransaction } from '@/lib/db/queries'
+import { replaceLogicalCallsForDate, withTransaction } from '@/lib/db/queries'
 import { getDashboardData } from '@/lib/kpis/get-dashboard-data'
 import { getPool } from '@/lib/db/client'
 
@@ -2290,7 +2765,7 @@ function hashPayload(value: unknown) {
 }
 
 export async function syncDay(day: Date) {
-  const dateKey = format(day, 'yyyy-MM-dd')
+  const dateKey = formatInTimeZone(day, 'America/Toronto', 'yyyy-MM-dd')
   const run = await getPool().query(
     `
       insert into ingest_runs (run_type, start_date, end_date, status)
@@ -2335,31 +2810,7 @@ export async function syncDay(day: Date) {
         )
       }
 
-      await client.query('delete from logical_calls where call_date = $1', [dateKey])
-      for (const call of logicalCalls) {
-        await client.query(
-          `
-            insert into logical_calls (
-              call_date, dedupe_key, caller_number, dnis, start_time, end_time,
-              answered, duration_seconds, representative_hash, payload
-            )
-            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-            on conflict (call_date, dedupe_key) do update set payload = excluded.payload
-          `,
-          [
-            call.callDate,
-            call.dedupeKey,
-            call.callerNumber,
-            call.dnis,
-            call.startTime,
-            call.endTime,
-            call.answered,
-            call.durationSeconds,
-            call.representativeHash,
-            call.payload,
-          ],
-        )
-      }
+      await replaceLogicalCallsForDate(client, dateKey, logicalCalls)
 
       for (const [index, stats] of queueStats.entries()) {
         await client.query(
