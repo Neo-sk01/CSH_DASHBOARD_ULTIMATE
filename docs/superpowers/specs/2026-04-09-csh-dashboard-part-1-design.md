@@ -173,7 +173,7 @@ The logical-call grouping strategy must be verified against one real historical 
 Once that verification is written down in `docs/versature-cdr-shape.md`, logical-call derivation must follow these rules:
 
 - use the verified shared call identifier as the primary dedupe key when one exists across segments
-- otherwise fall back to caller number plus a Toronto-local minute bucket
+- otherwise fall back to caller number plus a Toronto-local 1-minute bucket
 - restrict KPI #1 to groups touching the tracked DNIS values
 - use the DNIS-touching segment only to label the tracked DNIS
 - derive `answered` from whether any segment in the group has `answer_time`
@@ -272,11 +272,11 @@ Single-page dashboard with four vertical regions:
 2. KPI card grid
    - KPIs 1-7
    - Short Calls card as required operational companion metric
-   - small delta vs prior equivalent period where practical
+   - small delta vs prior equivalent period for KPIs 1-6 and Short Calls (today vs yesterday, this week vs last week, this month vs last month); omit delta when prior period data is unavailable
    - inline KPI #1 warning when logical-call and queue-stats methods drift
 
 3. Charts row
-   - Avg Call Length by Queue as its own multi-row panel
+   - Avg Call Length by Queue as a simple table listing each queue grouping (English, French, AI) with its average talk time
    - Language Split donut
    - Day-of-Week bar chart for month view
    - Hourly Duration line chart
@@ -305,7 +305,7 @@ Manual validation helper that prints:
 - delta percentage
 - dropped-call total
 - short-call total
-- representative logical-call samples for spot-checking
+- 10 logical-call samples (first 5 answered, first 5 unanswered) for spot-checking
 
 This script is part of the Part 1 completion gate.
 
