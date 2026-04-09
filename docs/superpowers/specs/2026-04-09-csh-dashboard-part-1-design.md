@@ -18,10 +18,10 @@ These rules are the core of the system and must be enforced in code, tests, docs
    A single real-world customer call can produce 3-5+ CDR segments across auto attendants, queues, and extensions.
 
 2. `call_type === 'Incoming'` is never enough to count queue-entering calls.
-   DNIS filtering must be applied for DNIS-based counts, and queue stats must be used for queue-level totals.
+   DNIS filtering must be applied for KPI #1, and deduped queue attribution must come from persisted `logical_calls` routing metadata rather than raw queue-stat fanout.
 
 3. `answer_time` does not prove a human answered the call.
-   Auto attendant behavior can populate `answer_time`, so dropped-call logic must come from queue stats `abandoned_calls`, not CDR inference.
+   Auto attendant behavior can populate `answer_time`, so dropped-call logic must come from grouped logical-call disposition, with queue stats `abandoned_calls` used only as a reconciliation input.
 
 ## Build Scope
 
@@ -144,6 +144,7 @@ PostgreSQL is the single source of truth for Part 1.
 `logical_calls`
 - Derived representation of real-world calls built from raw CDR segments
 - Exists specifically to prevent accidental overcounting from segment-level data
+- Also stores single-call routing attribution and future-proof flags such as `routing_bucket`, queue-touch booleans, `is_dropped`, `is_business_hours`, and `is_voice_assist`
 
 `kpi_daily_snapshots`
 - Daily KPI payloads for day-level reuse and week/month assembly
@@ -178,6 +179,11 @@ Once that verification is written down in `docs/versature-cdr-shape.md`, logical
 - use the DNIS-touching segment only to label the tracked DNIS
 - derive `answered` from whether any segment in the group has `answer_time`
 - derive `duration_seconds` from the longest answered segment, or from the longest segment overall if none were answered
+- assign one `routing_bucket` per logical call using the last tracked queue leg in the grouped segment trail: `english`, `french`, `ai`, or `unrouted`
+- persist queue-touch booleans alongside the single bucket so later assertions can compare the exclusive KPI bucket counts against the non-exclusive queue trail
+- derive `is_dropped` from the grouped segment trail, never from raw `answer_time`
+- persist `is_business_hours` on every logical call even though Part 1 does not yet expose BH-only KPI variants
+- persist `is_voice_assist = false` for every Part 1 logical call; Part 2 replaces that placeholder with MSP Process truth
 
 This is the mechanism that protects the dashboard from the "CDRs are not calls" failure mode.
 
@@ -187,7 +193,8 @@ For each affected date:
 
 1. Recompute KPI inputs from persisted raw and derived data
 2. Store KPI daily snapshots
-3. Store any KPI #1 delta warning when CDR-dedupe and queue-stats totals differ by more than 2%
+3. Run the assertion gate that checks deduped bucket counts and queue-stat reconciliation invariants
+4. Store any KPI #1 delta warning or assertion-gate warning with the ingest run
 
 Week and month views are assembled from stored daily data, not from fresh period-wide API pulls.
 
@@ -204,15 +211,19 @@ Return both counts plus delta percentage. Log and persist a warning when the var
 
 ### KPI #2: Total Dropped Calls
 
-Use only queue stats `abandoned_calls`, summed across English, French, AI overflow EN, and AI overflow FR.
+Count deduped `logical_calls` where `is_dropped = true`.
+
+Queue stats `abandoned_calls` stay in the system as a reconciliation input, not as the final KPI source.
 
 ### KPI #3 and #4
 
-Use queue stats `calls_offered` for English and French respectively.
+Count deduped `logical_calls` where `routing_bucket = 'english'` and `routing_bucket = 'french'` respectively.
 
 ### KPI #5: AI / Overflow Calls
 
-Sum `calls_offered` for both AI overflow queues.
+Count deduped `logical_calls` where `routing_bucket = 'ai'`.
+
+Part 1 still treats AI as a Versature queue-level concept. Part 2 replaces this KPI's source of truth with MSP Process `AiCallHistory` and reconciles the result against the Versature queue trail.
 
 ### KPI #6: % Dropped
 
@@ -251,13 +262,21 @@ Separate operational metric:
 
 It must not be merged into dropped calls, and the README must explicitly warn future maintainers not to "fix" the auto-attendant edge case by turning this into a human-answer metric.
 
+### Assertion Gate
+
+Every completed sync must run a daily assertion gate before the ingest run is considered clean:
+
+- KPI #3 + KPI #4 + KPI #5 must never exceed KPI #1 because the bucket assignment is exclusive
+- KPI #2 must never exceed KPI #1
+- KPI #1's queue-stats comparison remains a warning-producing reconciliation check
+
 ## Date and Business Rules
 
 - Timezone: `America/Toronto`
 - Default weekend handling: exclude Saturday and Sunday
 - Optional override: `?includeWeekends=true`
 - "This week" means Monday through Friday, capped at today when earlier
-- Business-hours fields from the provided env may exist, but Part 1 scope remains the prompt-defined Today / This Week / This Month views and weekend toggle
+- Business-hours fields from the provided env may exist, and Part 1 should persist `is_business_hours`, but the UI scope remains the prompt-defined Today / This Week / This Month views and weekend toggle
 
 ## UI Design
 
@@ -316,7 +335,7 @@ This script is part of the Part 1 completion gate.
 One test file per KPI under `tests/kpis/`, covering:
 
 - 100 raw CDRs collapsing to 25 logical calls
-- English queue offered and abandoned values
+- exclusive English/French/AI routing-bucket attribution plus dropped-call disposition
 - day-of-week month averaging
 - weekend exclusion
 - short-call identification from answered calls under 10 seconds
@@ -348,9 +367,18 @@ Part 1 is complete only when all of the following are true:
 2. Versature OAuth token exchange works and logs token scope
 3. Sync writes raw CDRs, queue stats, split rows, logical calls, and KPI daily snapshots into Postgres
 4. KPI #1 dual-method check is available and warns when variance exceeds 2%
-5. All tests pass
-6. A real historical day is manually validated against human counting
-7. Work stops after Part 1 and waits for explicit approval before Part 2 begins
+5. The assertion gate passes for the manually synced days
+6. All tests pass
+7. A real historical day is manually validated against human counting
+8. Work stops after Part 1 and waits for explicit approval before Part 2 begins
+
+## Deferred to Part 2
+
+- MSP Process integration. Part 1 treats AI as a Versature queue trail. Part 2 replaces KPI #5 with MSP Process `AiCallHistory` and reconciles it against the Versature queue counts.
+- Voice Assist vs AI Overflow distinction. `is_voice_assist` is stored as a placeholder `false` in Part 1 and is populated from MSP Process in Part 2.
+- ConnectWise ticket match rate. This remains entirely outside Part 1.
+- AI quality score KPI sourced from MSP Process `EvaluationScore`.
+- Business-hours-only KPI variants. Part 1 persists `is_business_hours` but does not surface BH-only cards or charts.
 
 ## Risks to Watch
 

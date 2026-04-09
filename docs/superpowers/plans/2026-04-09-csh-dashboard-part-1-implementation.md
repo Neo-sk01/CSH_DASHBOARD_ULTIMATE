@@ -4,7 +4,7 @@
 
 **Goal:** Build the Part 1 CSH dashboard as a local-first Next.js application that persists Versature data in PostgreSQL, computes the 10 approved KPIs plus the Short Calls metric, and makes the KPI #1 audit trail easy to verify against a human manual count.
 
-**Architecture:** The app is a greenfield Next.js App Router project. Versature data is pulled through a server-side OAuth client, stored raw in PostgreSQL, normalized into logical calls to avoid CDR overcounting, and then queried by one-file-per-KPI modules. The dashboard page reads from Postgres-backed daily data and never derives dropped calls from CDR `answer_time`.
+**Architecture:** The app is a greenfield Next.js App Router project. Versature data is pulled through a server-side OAuth client, stored raw in PostgreSQL, normalized into logical calls to avoid CDR overcounting, and then queried by one-file-per-KPI modules. The logical-call layer now also owns single-call routing attribution for KPI #2-#5 so queue fanout does not reintroduce double counting. The dashboard page reads from Postgres-backed daily data and never derives dropped calls from raw CDR `answer_time`.
 
 **Tech Stack:** Next.js App Router · TypeScript · React Server Components · Tailwind CSS · Recharts · PostgreSQL via `pg` · native `fetch` · `date-fns` · `date-fns-tz` · Vitest · `tsx`
 
@@ -54,6 +54,7 @@
 │   ├── connectwise/
 │   │   └── .gitkeep                          # Part 2 stub
 │   ├── kpis/
+│   │   ├── assertions.ts                     # Daily invariant gate for deduped KPIs
 │   │   ├── get-dashboard-data.ts             # Dashboard aggregator
 │   │   ├── kpi-1-total-incoming.ts
 │   │   ├── kpi-2-dropped.ts
@@ -79,7 +80,7 @@
 │   └── audit-day.ts                          # Human validation helper
 └── tests/
     ├── fixtures/
-    │   └── kpi-fixtures.ts                   # Shared test data
+    │   ├── kpi-fixtures.ts                   # Shared test data
     ├── filters/
     │   ├── dnis.test.ts
     │   └── weekends.test.ts
@@ -94,6 +95,7 @@
     ├── db/
     │   └── queries.test.ts
     ├── kpis/
+    │   ├── assertions.test.ts
     │   ├── kpi-1-total-incoming.test.ts
     │   ├── kpi-2-dropped.test.ts
     │   ├── kpi-3-english.test.ts
@@ -195,6 +197,73 @@ The sync step now derives `dateKey` with `formatInTimeZone(..., 'America/Toronto
 ### S6. Verify whether the raw CDR `id` is reliable before locking in `source_hash` as the long-term key
 
 Task 0 must also record whether the top-level CDR `id` field is populated on every sampled row. If it is reliable, switch the raw CDR upsert to use `external_id` as the conflict target and keep the derived hash only as a fallback/debug field. If it is not reliable, keep `source_hash` as the primary key and add a schema comment explaining that it is a derived fallback sensitive to payload-shape changes.
+
+## Patch Amendments
+
+When this section conflicts with older task snippets later in the document, this section wins.
+
+### Order of application
+
+Apply the patches in this order so each one can land as a small reviewable PR:
+
+1. Patch 1: expand schema in Task 2
+2. Patch 5: dedup KPI #2 in Task 7
+3. Patch 2: dedup KPI #3, KPI #4, and KPI #5 in Task 7
+4. Patch 3: assertion gate in Task 9
+
+### Patch 1: Expand `logical_calls`
+
+Task 2 and Task 5 must persist the fields below on every logical call:
+
+- `routing_bucket`: `'english' | 'french' | 'ai' | 'unrouted'`
+- `touched_english_queue`, `touched_french_queue`, `touched_ai_queue`
+- `is_dropped`
+- `is_business_hours`
+- `is_voice_assist`
+
+Implementation notes:
+
+- `routing_bucket` is exclusive and must be derived from the last tracked queue leg in the grouped segment trail.
+- `is_dropped` must be derived from the grouped trail, not from raw `answer_time`.
+- `is_business_hours` is computed in Part 1 but BH-only KPI variants remain out of scope.
+- `is_voice_assist` is a Part 1 placeholder and must default to `false` until Part 2 adds MSP Process truth.
+
+### Patch 5: Dedup KPI #2
+
+Task 7 must stop using `queue_stats_daily.abandoned_calls` as the final KPI #2 source.
+
+- KPI #2 now counts deduped `logical_calls` where `is_dropped = true`.
+- Queue stats abandoned totals remain available only for assertion and audit output.
+
+### Patch 2: Dedup KPI #3, KPI #4, and KPI #5
+
+Task 7 must stop using queue-stats offered counts as the final source for KPI #3, KPI #4, and KPI #5.
+
+- KPI #3 counts `logical_calls` where `routing_bucket = 'english'`
+- KPI #4 counts `logical_calls` where `routing_bucket = 'french'`
+- KPI #5 counts `logical_calls` where `routing_bucket = 'ai'`
+
+The bucket is exclusive, so `KPI3 + KPI4 + KPI5` must never exceed `KPI1`.
+
+### Patch 3: Assertion gate
+
+Task 9 must add a daily assertion gate after snapshot computation and before the ingest run is treated as clean.
+
+Required invariants:
+
+- `kpi3.totalEnglish + kpi4.totalFrench + kpi5.totalAi <= kpi1.primaryCount`
+- `kpi2.totalDropped <= kpi1.primaryCount`
+- KPI #1 queue-stat reconciliation still warns when drift exceeds 2%
+
+The gate may log warnings or fail the ingest, but it must surface the exact invariant that broke.
+
+## Deferred to Part 2
+
+- MSP Process integration. KPI #5 is still a Versature queue-trail metric in Part 1.
+- Voice Assist vs AI Overflow distinction. `is_voice_assist` remains a placeholder until MSP Process is integrated.
+- ConnectWise ticket match rate.
+- AI quality score from `EvaluationScore`.
+- Business-hours-only KPI variants.
 
 ## Task 0: Verify Real Versature CDR Shape Before Scaffolding
 
@@ -725,7 +794,14 @@ create table if not exists logical_calls (
   dnis text not null,
   start_time timestamptz not null,
   end_time timestamptz not null,
+  routing_bucket text not null check (routing_bucket in ('english', 'french', 'ai', 'unrouted')),
+  touched_english_queue boolean not null default false,
+  touched_french_queue boolean not null default false,
+  touched_ai_queue boolean not null default false,
   answered boolean not null,
+  is_dropped boolean not null default false,
+  is_business_hours boolean not null default false,
+  is_voice_assist boolean not null default false,
   duration_seconds integer not null,
   representative_hash text not null references cdr_segments (source_hash),
   payload jsonb not null,
@@ -734,6 +810,8 @@ create table if not exists logical_calls (
 );
 
 create index if not exists idx_logical_calls_dnis on logical_calls (dnis);
+create index if not exists idx_logical_calls_routing_bucket on logical_calls (routing_bucket);
+create index if not exists idx_logical_calls_is_dropped on logical_calls (is_dropped);
 
 create table if not exists kpi_daily_snapshots (
   snapshot_date date primary key,
@@ -794,12 +872,21 @@ export type LogicalCallRow = {
   dnis: string
   startTime: string
   endTime: string
+  routingBucket: 'english' | 'french' | 'ai' | 'unrouted'
+  touchedEnglishQueue: boolean
+  touchedFrenchQueue: boolean
+  touchedAiQueue: boolean
   answered: boolean
+  isDropped: boolean
+  isBusinessHours: boolean
+  isVoiceAssist: boolean
   durationSeconds: number
   representativeHash: string
   payload: Record<string, unknown>
 }
 ```
+
+Patch 1 requirement: Task 5 must populate every one of these logical-call fields before Task 7 or Task 9 begins. Do not defer the new columns to a later cleanup pass.
 
 - [ ] **Step 4: Add the migration runner**
 
@@ -1664,6 +1751,8 @@ describe('buildUpsertQueueStatsStatement', () => {
 })
 ```
 
+Patch 1 test amendment: extend the logical-call tests above so they also assert the new attribution fields on at least one grouped call, including `routingBucket`, one or more `touched*Queue` flags, and `isVoiceAssist === false`.
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run:
@@ -1677,6 +1766,14 @@ Expected: FAIL with missing module errors.
 - [ ] **Step 3: Implement the logical-call builder and query helpers**
 
 Before transcribing the snippets below, read `docs/versature-cdr-shape.md` and replace the `getSharedCallId(...)` field lookup and any logical-call fixture fields anywhere the verified shared identifier path differs from the example here.
+
+Patch 1 amendment for this step:
+
+- extend `LogicalCall` with `routingBucket`, `touchedEnglishQueue`, `touchedFrenchQueue`, `touchedAiQueue`, `isDropped`, `isBusinessHours`, and `isVoiceAssist`
+- derive `routingBucket` from the last tracked queue leg in the grouped trail, not from the first leg
+- set `isVoiceAssist: false` for all Part 1 rows
+- derive `isDropped` from the grouped trail and terminal tracked state, never from raw `answer_time`
+- populate the new columns in `replaceLogicalCallsForDate(...)` so the DB row shape matches Task 2 exactly
 
 Create `lib/versature/logical-calls.ts`:
 
@@ -1859,6 +1956,12 @@ export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>)
   }
 }
 ```
+
+Patch 1 override for the SQL helper above:
+
+- the `insert into logical_calls (...)` column list must now include `routing_bucket`, `touched_english_queue`, `touched_french_queue`, `touched_ai_queue`, `is_dropped`, `is_business_hours`, and `is_voice_assist`
+- the update clause must refresh those same fields on conflict
+- the bound values list must match the expanded `LogicalCallRow` type from Task 2
 
 - [ ] **Step 4: Run the tests again**
 
@@ -2052,6 +2155,21 @@ git commit -m "feat: add audited total incoming KPI"
 - Create: `/Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard/lib/kpis/kpi-6-pct-dropped.ts`
 - Create: `/Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard/lib/kpis/short-calls.ts`
 
+Patch 5 plus Patch 2 override the original Task 7 source rules:
+
+- rewrite `tests/kpis/kpi-2-dropped.test.ts` to mock `getDroppedLogicalCallCount`, not `getAbandonedCallsForQueues`
+- rewrite `tests/kpis/kpi-3-english.test.ts`, `tests/kpis/kpi-4-french.test.ts`, and `tests/kpis/kpi-5-ai.test.ts` to mock `getLogicalCallCountByRoutingBucket`
+- `lib/kpis/kpi-2-dropped.ts` must read from `logical_calls.is_dropped`
+- `lib/kpis/kpi-3-english.ts`, `lib/kpis/kpi-4-french.ts`, and `lib/kpis/kpi-5-ai.ts` must read from the exclusive `routing_bucket` values `english`, `french`, and `ai`
+- queue stats `calls_offered` and `abandoned_calls` remain available for KPI #1 reconciliation, KPI #8, and the Task 9 assertion gate, but they are no longer the final KPI #2-#5 source of truth
+
+Use these helper signatures in `lib/db/queries.ts`:
+
+```ts
+getDroppedLogicalCallCount(period, options)
+getLogicalCallCountByRoutingBucket(period, routingBucket, options)
+```
+
 - [ ] **Step 1: Write the failing tests**
 
 Create `tests/kpis/kpi-2-dropped.test.ts`:
@@ -2060,11 +2178,11 @@ Create `tests/kpis/kpi-2-dropped.test.ts`:
 import { describe, expect, test, vi } from 'vitest'
 
 vi.mock('@/lib/db/queries', () => ({
-  getAbandonedCallsForQueues: vi.fn().mockResolvedValue(5),
+  getDroppedLogicalCallCount: vi.fn().mockResolvedValue(5),
 }))
 
 describe('computeKpi2', () => {
-  test('uses abandoned_calls from queue stats', async () => {
+  test('counts deduped dropped logical calls', async () => {
     const { computeKpi2 } = await import('@/lib/kpis/kpi-2-dropped')
     expect(
       await computeKpi2({ start: new Date('2026-04-01T00:00:00Z'), end: new Date('2026-04-01T23:59:59Z') }),
@@ -2124,11 +2242,11 @@ Create `tests/kpis/kpi-3-english.test.ts`:
 import { describe, expect, test, vi } from 'vitest'
 
 vi.mock('@/lib/db/queries', () => ({
-  getCallsOfferedForQueues: vi.fn().mockResolvedValue(50),
+  getLogicalCallCountByRoutingBucket: vi.fn().mockResolvedValue(50),
 }))
 
 describe('computeKpi3', () => {
-  test('returns English queue offered volume', async () => {
+  test('returns the deduped English routing bucket volume', async () => {
     const { computeKpi3 } = await import('@/lib/kpis/kpi-3-english')
     expect(
       await computeKpi3({ start: new Date('2026-04-01T00:00:00Z'), end: new Date('2026-04-01T23:59:59Z') }),
@@ -2143,11 +2261,11 @@ Create `tests/kpis/kpi-4-french.test.ts`:
 import { describe, expect, test, vi } from 'vitest'
 
 vi.mock('@/lib/db/queries', () => ({
-  getCallsOfferedForQueues: vi.fn().mockResolvedValue(12),
+  getLogicalCallCountByRoutingBucket: vi.fn().mockResolvedValue(12),
 }))
 
 describe('computeKpi4', () => {
-  test('returns French queue offered volume', async () => {
+  test('returns the deduped French routing bucket volume', async () => {
     const { computeKpi4 } = await import('@/lib/kpis/kpi-4-french')
     expect(
       await computeKpi4({ start: new Date('2026-04-01T00:00:00Z'), end: new Date('2026-04-01T23:59:59Z') }),
@@ -2162,11 +2280,11 @@ Create `tests/kpis/kpi-5-ai.test.ts`:
 import { describe, expect, test, vi } from 'vitest'
 
 vi.mock('@/lib/db/queries', () => ({
-  getCallsOfferedForQueues: vi.fn().mockResolvedValue(18),
+  getLogicalCallCountByRoutingBucket: vi.fn().mockResolvedValue(18),
 }))
 
 describe('computeKpi5', () => {
-  test('returns the combined AI overflow queue volume', async () => {
+  test('returns the deduped AI routing bucket volume', async () => {
     const { computeKpi5 } = await import('@/lib/kpis/kpi-5-ai')
     expect(
       await computeKpi5({ start: new Date('2026-04-01T00:00:00Z'), end: new Date('2026-04-01T23:59:59Z') }),
@@ -2190,35 +2308,29 @@ Expected: FAIL with missing module errors.
 Create `lib/kpis/kpi-2-dropped.ts`:
 
 ```ts
-import { AI_OVERFLOW_QUEUE_IDS, ENGLISH_QUEUE_ID, FRENCH_QUEUE_ID } from '@/lib/versature/queues'
-import { getAbandonedCallsForQueues } from '@/lib/db/queries'
+import { getDroppedLogicalCallCount } from '@/lib/db/queries'
 
 export async function computeKpi2(
   period: { start: Date; end: Date },
   options: { includeWeekends?: boolean } = {},
 ) {
-  const totalDropped = await getAbandonedCallsForQueues(period, [
-    ENGLISH_QUEUE_ID,
-    FRENCH_QUEUE_ID,
-    ...AI_OVERFLOW_QUEUE_IDS,
-  ], options)
-
-  return { totalDropped }
+  return {
+    totalDropped: await getDroppedLogicalCallCount(period, options),
+  }
 }
 ```
 
 Create `lib/kpis/kpi-3-english.ts`:
 
 ```ts
-import { ENGLISH_QUEUE_ID } from '@/lib/versature/queues'
-import { getCallsOfferedForQueues } from '@/lib/db/queries'
+import { getLogicalCallCountByRoutingBucket } from '@/lib/db/queries'
 
 export async function computeKpi3(
   period: { start: Date; end: Date },
   options: { includeWeekends?: boolean } = {},
 ) {
   return {
-    totalEnglish: await getCallsOfferedForQueues(period, [ENGLISH_QUEUE_ID], options),
+    totalEnglish: await getLogicalCallCountByRoutingBucket(period, 'english', options),
   }
 }
 ```
@@ -2226,15 +2338,14 @@ export async function computeKpi3(
 Create `lib/kpis/kpi-4-french.ts`:
 
 ```ts
-import { FRENCH_QUEUE_ID } from '@/lib/versature/queues'
-import { getCallsOfferedForQueues } from '@/lib/db/queries'
+import { getLogicalCallCountByRoutingBucket } from '@/lib/db/queries'
 
 export async function computeKpi4(
   period: { start: Date; end: Date },
   options: { includeWeekends?: boolean } = {},
 ) {
   return {
-    totalFrench: await getCallsOfferedForQueues(period, [FRENCH_QUEUE_ID], options),
+    totalFrench: await getLogicalCallCountByRoutingBucket(period, 'french', options),
   }
 }
 ```
@@ -2242,15 +2353,14 @@ export async function computeKpi4(
 Create `lib/kpis/kpi-5-ai.ts`:
 
 ```ts
-import { AI_OVERFLOW_QUEUE_IDS } from '@/lib/versature/queues'
-import { getCallsOfferedForQueues } from '@/lib/db/queries'
+import { getLogicalCallCountByRoutingBucket } from '@/lib/db/queries'
 
 export async function computeKpi5(
   period: { start: Date; end: Date },
   options: { includeWeekends?: boolean } = {},
 ) {
   return {
-    totalAi: await getCallsOfferedForQueues(period, [...AI_OVERFLOW_QUEUE_IDS], options),
+    totalAi: await getLogicalCallCountByRoutingBucket(period, 'ai', options),
   }
 }
 ```
@@ -2297,24 +2407,43 @@ export async function computeShortCalls(
 Append to `lib/db/queries.ts`:
 
 ```ts
-export async function getAbandonedCallsForQueues(
+export async function getDroppedLogicalCallCount(
   period: { start: Date; end: Date },
-  queueIds: string[],
   options: { includeWeekends?: boolean } = {},
 ) {
-  // stats_date is stored as the Toronto business date requested from Versature.
   const result = await getPool().query(
     `
-      select coalesce(sum(abandoned_calls), 0)::int as count
-      from queue_stats_daily
-      where stats_date between $1::date and $2::date
-        and queue_id = any($3::text[])
-        and ($4::boolean or extract(isodow from stats_date) between 1 and 5)
+      select count(*)::int as count
+      from logical_calls
+      where start_time >= $1
+        and start_time <= $2
+        and is_dropped = true
+        and ($3::boolean or extract(isodow from start_time at time zone 'America/Toronto') between 1 and 5)
+    `,
+    [period.start.toISOString(), period.end.toISOString(), options.includeWeekends ?? false],
+  )
+
+  return result.rows[0]?.count ?? 0
+}
+
+export async function getLogicalCallCountByRoutingBucket(
+  period: { start: Date; end: Date },
+  routingBucket: 'english' | 'french' | 'ai' | 'unrouted',
+  options: { includeWeekends?: boolean } = {},
+) {
+  const result = await getPool().query(
+    `
+      select count(*)::int as count
+      from logical_calls
+      where start_time >= $1
+        and start_time <= $2
+        and routing_bucket = $3
+        and ($4::boolean or extract(isodow from start_time at time zone 'America/Toronto') between 1 and 5)
     `,
     [
-      period.start.toISOString().slice(0, 10),
-      period.end.toISOString().slice(0, 10),
-      queueIds,
+      period.start.toISOString(),
+      period.end.toISOString(),
+      routingBucket,
       options.includeWeekends ?? false,
     ],
   )
@@ -2717,11 +2846,20 @@ git commit -m "feat: add split and duration KPI modules"
 ## Task 9: Implement Sync Orchestration, Refresh Route, and Audit Script
 
 **Files:**
+- Create: `/Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard/tests/kpis/assertions.test.ts`
 - Create: `/Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard/tests/kpis/get-dashboard-data.test.ts`
+- Create: `/Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard/lib/kpis/assertions.ts`
 - Create: `/Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard/lib/versature/sync.ts`
 - Create: `/Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard/lib/kpis/get-dashboard-data.ts`
 - Create: `/Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard/app/api/refresh/route.ts`
 - Create: `/Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard/scripts/audit-day.ts`
+
+Patch 3 amendment for this task:
+
+- add `lib/kpis/assertions.ts` with an `assertPart1Invariants(snapshot)` helper
+- add `tests/kpis/assertions.test.ts` to prove the gate fails loudly when KPI #2 or KPI #3-#5 exceed KPI #1
+- call the assertion helper after `getDashboardData(...)` and before the ingest run is marked complete
+- surface broken invariants through `ingest_runs.warnings` and the thrown error path so operators can see exactly which assertion failed
 
 - [ ] **Step 1: Write the failing dashboard aggregator test**
 
@@ -2777,6 +2915,7 @@ import { getDomainCdrs, getQueueSplits, getQueueStats } from './endpoints'
 import { AI_OVERFLOW_QUEUE_IDS, ENGLISH_QUEUE_ID, FRENCH_QUEUE_ID } from './queues'
 import { buildLogicalCalls } from './logical-calls'
 import { replaceLogicalCallsForDate, withTransaction } from '@/lib/db/queries'
+import { assertPart1Invariants } from '@/lib/kpis/assertions'
 import { getDashboardData } from '@/lib/kpis/get-dashboard-data'
 import { getPool } from '@/lib/db/client'
 
@@ -2890,6 +3029,20 @@ export async function syncDay(day: Date) {
     }
 
     const snapshot = await getDashboardData(period, { includeWeekends: false })
+    const assertionWarnings = assertPart1Invariants(snapshot)
+
+    if (assertionWarnings.length > 0) {
+      await getPool().query(
+        `
+          update ingest_runs
+          set warnings = $2
+          where id = $1
+        `,
+        [run.rows[0].id, JSON.stringify(assertionWarnings)],
+      )
+
+      throw new Error(`Part 1 assertion gate failed: ${assertionWarnings.join('; ')}`)
+    }
 
     await withTransaction(async (client) => {
       await client.query(
@@ -3076,7 +3229,7 @@ npx vitest run tests/kpis/get-dashboard-data.test.ts
 Run:
 
 ```bash
-git add tests/kpis/get-dashboard-data.test.ts lib/versature/sync.ts lib/kpis/get-dashboard-data.ts app/api/refresh/route.ts scripts/audit-day.ts
+git add tests/kpis/assertions.test.ts tests/kpis/get-dashboard-data.test.ts lib/kpis/assertions.ts lib/versature/sync.ts lib/kpis/get-dashboard-data.ts app/api/refresh/route.ts scripts/audit-day.ts
 git commit -m "feat: add sync flow refresh api and audit script"
 ```
 
@@ -3450,8 +3603,8 @@ Create `README.md`:
 If numbers look wrong, check these first:
 
 1. Are you counting raw CDRs instead of logical calls? Re-run the audit script and compare the logical-call total to the raw segment total before trusting KPI #1.
-2. Are you filtering by `call_type === 'Incoming'` instead of DNIS or queue stats? Use DNIS-filtered logical calls for KPI #1 and queue stats for queue-offered totals.
-3. Are you treating `answer_time` as proof that a human answered? Use queue stats `abandoned_calls` for dropped-call reporting, and treat `answer_time` only as an input for duration-oriented metrics.
+2. Are you still sourcing KPI #2-#5 from queue stats? Use deduped `logical_calls` with `routing_bucket` and `is_dropped` for those KPIs; keep queue stats for reconciliation only.
+3. Are you treating `answer_time` as proof that a human answered? Treat it only as a duration signal. Dropped-call status must come from grouped logical-call disposition, not raw segment answer flags.
 ```
 
 - [ ] **Step 2: Run the full test suite**
@@ -3489,6 +3642,7 @@ Expected:
 - a printed delta percentage
 - a clear dropped-call total
 - a short-call total
+- no assertion-gate failures for the synced day
 
 Then manually compare the printed counts to the operator's historical day count. Do not start Part 2 until this check is signed off.
 
@@ -3508,7 +3662,9 @@ git commit -m "docs: add setup and audit instructions"
 - Greenfield Next.js structure: covered in Tasks 1, 10, and 11.
 - PostgreSQL override: covered in Tasks 2, 5, and 9.
 - Versature OAuth and endpoint wrapping: covered in Task 4.
-- Dedupe and CDR-vs-call guardrail: covered in Tasks 5 and 6.
+- Dedupe and CDR-vs-call guardrail: covered in Tasks 5, 6, and the patch amendments.
+- Deduped KPI #2-#5 attribution: covered in Task 7 plus Patch 2 and Patch 5.
+- Assertion gate: covered in Task 9 plus Patch 3.
 - KPIs 1-10 and Short Calls: covered in Tasks 6, 7, and 8.
 - Manual refresh endpoint: covered in Task 9.
 - Manual audit before Part 2: covered in Task 11.
@@ -3523,6 +3679,7 @@ git commit -m "docs: add setup and audit instructions"
 ### Type consistency
 
 - Queue IDs consistently use `QUEUE_ENGLISH`, `QUEUE_FRENCH`, `QUEUE_AI_OVERFLOW_EN`, and `QUEUE_AI_OVERFLOW_FR`.
+- Logical-call attribution consistently uses `routing_bucket` values `english`, `french`, `ai`, and `unrouted`.
 - KPI functions consistently accept `{ start: Date; end: Date }`.
 - KPI #1 consistently exposes `primaryCount`, `queueCount`, `deltaPct`, and `warning`.
 
