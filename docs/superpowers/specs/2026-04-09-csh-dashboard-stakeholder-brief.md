@@ -6,11 +6,13 @@ Purpose: Explain, in plain language, what is being built, why it matters, and ho
 
 ## Executive Summary
 
-NeoLore is building a new internal CSH call dashboard so the team can see a clearer and more trustworthy picture of call activity.
+NeoLore is building a new internal Customer Success Heroes (CSH) call dashboard so the team can see a clearer and more trustworthy picture of call activity.
 
 The main reason this work matters is simple: call reporting sounds easy, but in practice it is easy to count the same customer call more than once, or to label a call incorrectly. If that happens, the business can make decisions based on numbers that look precise but are actually misleading.
 
 This dashboard is being designed specifically to avoid that problem.
+
+The dashboard is being built in two parts.
 
 Part 1 focuses on building a reliable foundation first. That means:
 
@@ -19,6 +21,8 @@ Part 1 focuses on building a reliable foundation first. That means:
 - calculating the approved KPIs from that organized data
 - adding checks so the team can spot when two counting methods disagree
 - making the results visible in a simple operational dashboard
+
+Part 2 builds directly on top of that foundation. Once the call numbers are trusted, Part 2 answers the next operational question: for every call handled by Thomas Anderson, the AI phone assistant, did the system produce a real result? It connects each AI call to its ConnectWise support ticket and tracks whether those tickets were resolved on time.
 
 Just as important, Part 1 is not trying to do everything at once. It is intentionally limited so the team can first prove that the core numbers are dependable before adding more advanced reporting later.
 
@@ -126,6 +130,8 @@ So the dashboard has to distinguish between:
 | Call | The full customer journey from start to finish | 1 |
 | CDR | One technical segment or hop within that journey | 3-5+ is possible |
 
+For example: a caller who hears a menu, waits in a queue, and then reaches an agent has experienced one call. The phone platform may have recorded four separate CDRs — one for the menu, one for the hold, one for the queue transfer, one for the agent connection. Counting those four CDRs as four calls would overstate volume by 4×.
+
 This is the heart of the issue.
 
 If someone counts CDRs as if they were calls, the result will almost always be too high.
@@ -202,13 +208,13 @@ The dashboard will support simple operational views such as:
 
 It will include the approved KPI set for Part 1, plus the required short-call metric.
 
-It will also include a manual refresh workflow so the team can trigger a data refresh when needed, instead of waiting for a more advanced automation layer that may come later.
+It will also include a manual refresh workflow so the team can trigger a data refresh when needed. This is a deliberate Part 1 constraint, not a permanent design choice. A scheduled, automated refresh is planned for a later phase once the core data quality has been validated.
 
 ### What the system will do behind the scenes
 
 Behind the dashboard, the system will:
 
-- connect to the Versature source
+- connect to Versature (the phone platform) as the data source
 - pull the relevant call and queue data
 - store that source data in a database
 - rebuild a cleaner "logical call" view
@@ -359,10 +365,8 @@ The project is deliberately not trying to solve every analytics question in one 
 
 Part 1 does not fully deliver:
 
-- ConnectWise-based metrics
-- MSP Process-driven AI quality metrics
-- full Voice Assist distinction
-- broader Part 2 KPI additions
+- ticket correlation for Thomas Anderson calls — that is Part 2's job
+- the four new AI performance KPIs described in the Part 2 section below
 - user authentication and role-based access
 - every future operational slice the business may eventually want
 
@@ -375,6 +379,68 @@ That is the right order.
 If the foundation is weak, adding more dashboards on top of it only creates faster confusion.
 
 If the foundation is strong, later enhancements become safer and more useful.
+
+## What Part 2 Will Add
+
+Once Part 1 is validated and trusted, Part 2 extends the dashboard with one focused question:
+
+For every call that Thomas Anderson handled, did the AI workflow produce a real result?
+
+That sounds simple, but it has real operational implications. If Thomas Anderson is handling calls but failing to create tickets, or creating tickets that get immediately discarded, the team needs to know. Part 2 is designed to surface that clearly.
+
+### How Part 2 Connects Calls to Tickets
+
+When Thomas Anderson finishes a call, a support ticket is supposed to appear in ConnectWise.
+
+Part 2 finds that ticket by looking for a ConnectWise record that matches both the caller's phone number and the time the call ended, within a five-minute window. This approach is deliberate. A simpler method would be to look for tickets marked as "created by MSP Process," but that label can get lost or overwritten when tickets are merged or reassigned. Matching by phone and time is more reliable.
+
+### What Part 2 Actually Tracks
+
+Part 2 adds four new performance indicators, each answering a different part of the operational story.
+
+**Ticket Creation Rate**
+
+Of all the calls Thomas Anderson handled, what percentage resulted in a real ConnectWise ticket?
+
+A high rate means the AI is consistently completing its job. A low or dropping rate is an early warning sign that something in the workflow is failing.
+
+**Failure-Mode Rate**
+
+Some calls that Thomas Anderson cannot handle get routed to a special catchall bucket called Z-SPAM. This is not a spam filter in the traditional sense. It is the AI's internal failure-mode bucket — a signal that the system could not categorize the call and gave up.
+
+This metric tracks how often that happens. A rising failure-mode rate means Thomas Anderson is struggling with a category of call and may need retraining or escalation to a human.
+
+**Merge Rate**
+
+Sometimes a ConnectWise ticket created by Thomas Anderson gets merged into another ticket — for example, because a human agent was already handling the same issue.
+
+This metric tracks how often that happens. A high merge rate might mean duplicate work is occurring, or that certain call types should be routed to humans directly instead of going through the AI first.
+
+**AI Ticket SLA Health**
+
+For tickets that were created normally and stayed open as their own separate work item, is the team resolving them on time?
+
+This metric tracks the health of those surviving tickets: what percentage met their service deadlines, what percentage did not, and what the typical resolution time looks like.
+
+### What Part 2 Does Not Change
+
+Part 2 is strictly additive. It does not touch any of the Part 1 call-counting rules or KPIs.
+
+This is an important design choice.
+
+If Part 2 changed the definition of an AI call at the same time it added new ticket metrics, it would become very hard to tell whether a change in a number was caused by a real business shift or just by a change in how the system counts. Keeping the two layers separate means numbers can be compared and trusted.
+
+### What Operators Will See in Part 2
+
+The dashboard will gain a new section called AI Voice Assist Health, sitting below the existing KPI grid.
+
+It will show:
+
+- the four new KPIs described above
+- a table of every AI-handled call where no matching ticket was found, so operators can investigate those individually
+- plain-language explanations next to every metric so the business meaning is clear without needing to consult a technical document
+
+The uncorrelated calls table is particularly important. It is not a failure log. It is an operator tool for following up on calls the system could not match automatically. Every unmatched call is listed with the caller number and call time so a human can look it up directly in ConnectWise if needed.
 
 ## Why This Approach Is Better Than Rushing to a Bigger Dashboard
 
@@ -412,6 +478,8 @@ Success should mean:
 - there is less confusion about what is being counted
 - known counting pitfalls are actively guarded against
 - the business has enough confidence in Part 1 to decide whether to move into Part 2
+
+Part 2 would build on that foundation by adding the AI Voice Assist Health section — connecting Thomas Anderson's calls to their ConnectWise tickets and tracking ticket creation rate, failure-mode rate, merge rate, and SLA health. Part 1 makes that expansion possible and trustworthy.
 
 In other words, success is not just visibility.
 
