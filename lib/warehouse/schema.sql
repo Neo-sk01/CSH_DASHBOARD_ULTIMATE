@@ -53,19 +53,12 @@ CREATE TABLE IF NOT EXISTS raw_queue_splits (
 CREATE TABLE IF NOT EXISTS logical_calls (
   from_call_id            VARCHAR PRIMARY KEY,
   call_date               DATE NOT NULL,
-  caller_id               VARCHAR,
-  start_time              TIMESTAMP NOT NULL,
-  end_time                TIMESTAMP NOT NULL,
-  total_duration_seconds  INTEGER NOT NULL,
+  caller_id               VARCHAR,                 -- from_id of the earliest segment
+  start_time              TIMESTAMP NOT NULL,      -- min(start_time)
+  end_time                TIMESTAMP NOT NULL,      -- max(end_time)
+  total_duration_seconds  INTEGER NOT NULL,        -- sum(duration_seconds) across segments
   segment_count           INTEGER NOT NULL,
-  touched_dnis            BOOLEAN NOT NULL,
-  touched_queues          VARCHAR[],
-  first_tracked_queue     VARCHAR,
-  touched_ai              BOOLEAN NOT NULL,
-  is_english              BOOLEAN NOT NULL,
-  is_french               BOOLEAN NOT NULL,
-  is_ai                   BOOLEAN NOT NULL,
-  is_ai_overflow          BOOLEAN NOT NULL,
+  touched_dnis            BOOLEAN NOT NULL,        -- Revision 2: kept; queue-touch fields removed
   rebuilt_at              TIMESTAMP NOT NULL,
   pull_run_id             VARCHAR NOT NULL
 );
