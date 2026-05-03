@@ -114,87 +114,308 @@ This plan creates and modifies the following files. Each file has a single, name
 
 ## Task 0: Run verification scripts (HARD GATE)
 
-The spec defines five Task 0 hard gates. None of the rest of the plan can proceed until each one passes. Failure halts implementation until the design is updated.
+The spec defines six Task 0 gates (gates 1–5 are hard pass/fail; gate 6 is informational). None of the rest of the plan can proceed until each one is resolved. **Failure on a hard gate halts implementation until the design is updated** per the gate-specific failure decision in the spec.
 
-**Files:**
-- Create: `scripts/inspect-queue-shape.mjs`
-- Read: `scripts/inspect-cdr-shape.mjs` (existing)
-- Output: `tests/fixtures/real-cdr-samples.ndjson`, `tests/fixtures/real-cdr-samples.expected.json`, a written verification report at `docs/versature-task-0-verification.md`
+This task produces three artifacts that all must land in the same commit:
+1. `docs/versature-task-0-verification.md` — human-readable report with full audit metadata.
+2. `tests/fixtures/versature-task-0-results.json` — machine-readable equivalent for future CI ingestion.
+3. `tests/fixtures/real-cdr-samples.ndjson` + `tests/fixtures/real-cdr-samples.expected.json` + `tests/fixtures/dnis-allowed-exceptions.json` — sanitized fixtures + canary expected counts + DNIS exception list.
 
-- [ ] **Step 1: Re-run CDR shape inspection against today's tenant**
+Plus three new scripts:
+4. `scripts/inspect-queue-shape.mjs` — Gate 2 verification.
+5. `scripts/sanitize-cdr-samples.mjs` — produces the redacted NDJSON from a raw CDR response.
+6. `scripts/breakdown-cdr-samples.mjs` — runs the production SQL against the sanitized fixtures and emits a per-bucket count for cross-checking the manual classification.
 
-Run: `node --env-file=.env.local --import tsx scripts/inspect-cdr-shape.mjs 2026-04-30`
+**Audit metadata** (must appear in both the .md and .json artifacts): command run, executor name, timestamp (UTC + Toronto-local), tenant label, queue IDs tested, exact API parameters, total CDR rows inspected, pagination page count, observed `Retry-After` or rate-limit response headers if any, pass/fail per gate, decision taken on any failure.
 
-Expected output: a JSON dump showing `rowArrayKey: "<array-root>"`, a non-zero `rowCount`, and `firstRowKeys` matching `["duration","answer_time","start_time","end_time","from","to"]`. If the shape differs, stop and update the spec's "Tenant-Specific Facts" before continuing.
+---
 
-- [ ] **Step 2: Create the queue-shape inspection script**
+### Gate 1: CDR shape unchanged (two sample dates)
 
-Create `scripts/inspect-queue-shape.mjs`. The script authenticates with Versature using the existing client-credentials pattern (copy from `inspect-cdr-shape.mjs`), then for a single date:
+- [ ] **Step 1.1: Re-run CDR shape inspection on a high-volume date**
 
-1. Fetches CDRs via `GET /cdrs/?start_date=DATE&end_date=DATE&limit=2000`.
-2. For each tracked queue ID (`8020,8021,8030,8031`), fetches `GET /call_queues/{queue}/stats/?start_date=DATE&end_date=DATE`.
-3. For each tracked queue ID, computes the count of distinct `from.call_id` values in the CDR set whose at-least-one segment has `to.user === queueId`.
-4. Outputs a JSON report comparing the per-queue CDR-derived count to the per-queue `calls_offered` from queue stats.
-5. Also outputs the top 30 distinct `to.user` values that are NOT in the tracked-queue set, so you can confirm there isn't a different queue identifier being used.
+Pick a recent business-day date with high call volume (e.g. a recent Tuesday, Wednesday, or Thursday).
 
-The output JSON must be machine-readable (single object) so it can be diffed across runs.
+Run: `node --env-file=.env.local --import tsx scripts/inspect-cdr-shape.mjs YYYY-MM-DD`
 
-- [ ] **Step 3: Run queue-shape inspection and verify Pass criterion 1**
+Expected output: `rowArrayKey: '<array-root>'`, non-zero `rowCount`, `firstRowKeys` matching `["duration","answer_time","start_time","end_time","from","to"]`, every sampled `from.call_id` non-null.
 
-Run: `node --env-file=.env.local --import tsx scripts/inspect-queue-shape.mjs 2026-04-30`
+- [ ] **Step 1.2: Re-run on a low-volume / boundary date**
 
-Expected: for each tracked queue, `queueTouchCounts[qid]` is within ±5% of `queueOfferedCounts[qid]`. Record actual percentages. If any queue fails, **stop** and either find a different queue-touch identifier (likely a different field) or revise the spec.
+Pick a Sunday, holiday, or a date adjacent to a DST change.
 
-- [ ] **Step 4: Verify Pass criterion 2 — splits rate limit**
+Run: `node --env-file=.env.local --import tsx scripts/inspect-cdr-shape.mjs YYYY-MM-DD`
 
-Manual test: write a tiny throwaway script that issues 30 requests to `GET /call_queues/8020/reports/splits/?start_date=2026-04-30&end_date=2026-04-30&period=day` in a 60-second window with no delays. Count 429 responses. If 0, raise `queue_splits.perMinute` to 24 in `lib/versature/rate-limiter.ts` (later task). If any 429s, lower to the observed safe limit. Record the result.
+Expected: same shape as Step 1.1 (allow `rowCount` to be small or zero — boundary dates often have low volume).
 
-- [ ] **Step 5: Verify Pass criterion 3 — `from_call_id` uniqueness over 30 days**
+**Pass criterion:** both responses match the expected shape. Both `firstRowKeys` arrays are identical.
 
-Pull CDRs for the last 30 calendar dates (one date per request, since we're not yet in a paginated loop), aggregate the `(from_call_id, calendar-date)` pairs, and check that no `from_call_id` appears with two different dates. The simplest way: write a small TypeScript helper at `scripts/check-call-id-uniqueness.ts` that loops over dates, accumulates the pairs into a `Map<from_call_id, Set<date>>`, and prints any entry whose Set size is > 1. Expected: zero such entries.
+**If fail:** stop. Update the spec's "Tenant-Specific Facts" section AND `lib/versature/types.ts` before proceeding.
 
-If any entries exist, **stop**. The schema PK changes to `(from_call_id, call_date)` and all downstream SQL needs updates.
+---
 
-- [ ] **Step 6: Verify Pass criterion 4 — DNIS normalization coverage**
+### Gate 2: Queue-touch inference (CRITICAL)
 
-Reuse the same 30-day pull. Extract the distinct `to.id` values from every CDR row (filter out nulls), then run each one through the `normalizeDnis` function defined in Task 3 (you can paste the function body into a quick scratch script). Expected: zero values where `to.id IS NOT NULL` and `normalizeDnis(to.id) === null`. If any fail, extend the function and re-run before Task 3.
+- [ ] **Step 2.1: Create the queue-shape inspection script**
 
-- [ ] **Step 7: Verify Pass criterion 5 — segment timestamp tie-breaking**
+Create `scripts/inspect-queue-shape.mjs`. Outline (full implementation in spec; copy + flesh out):
 
-From the same sample, count `from_call_id` groups where 2+ tracked-queue segments share an exact `start_time`. Record the count. The SQL secondary sort (`ORDER BY start_time, source_hash`) is already in the design; confirming the tie cases exist in real data ensures the test will actually exercise that code path.
+1. Authenticate via OAuth client credentials (copy auth pattern from `scripts/inspect-cdr-shape.mjs`).
+2. For ONE date, fetch CDRs via `GET /cdrs/?start_date=DATE&end_date=DATE&limit=2000` (paginate if `limit < total`).
+3. For each tracked queue ID in `8020,8021,8030,8031`, fetch `GET /call_queues/{queue}/stats/?start_date=DATE&end_date=DATE`.
+4. **Use the EXACT same date range, timezone (America/Toronto), queue list, and inclusion rules that the production pipeline will use.** Do not loosen any of these for verification; the goal is to compare apples to apples.
+5. For each tracked queue, compute `A` = count of distinct `from.call_id`s in the CDR set where at least one segment has `to.user === queueId`.
+6. Compute `B` = `calls_offered` from the queue stats response.
+7. Compute `diff = A - B` and `tolerance = max(0.05 * B, 3)`.
+8. Pass if `abs(diff) <= tolerance` for every tracked queue. Otherwise fail (per-queue and aggregate).
+9. Also output the top 30 distinct `to.user` values NOT in the tracked-queue set so you can confirm there isn't a different queue identifier in use.
+10. Output as a single JSON object suitable for diffing across runs.
 
-- [ ] **Step 8: Capture sanitized real CDR samples for fixtures**
+- [ ] **Step 2.2: Run the inspection**
 
-From the verification day's response, extract 50–100 segments belonging to ~25 distinct `from_call_id`s with mixed routing patterns (English, French, AI, AI overflow, abandoned). Replace any caller phone numbers with redacted forms (`+15551234567`, `+15551234568`, ...) but keep `to.user`, `to.id` (for tracked DNIS), `start_time`, `end_time`, `duration`, `answer_time` exactly as returned. Save to `tests/fixtures/real-cdr-samples.ndjson` (one JSON per line).
+Run: `node --env-file=.env.local --import tsx scripts/inspect-queue-shape.mjs YYYY-MM-DD`
 
-- [ ] **Step 9: Compute and freeze expected logical-call counts**
+Record per-queue and aggregate accuracy in the verification artifacts.
 
-Manually classify the sanitized samples and compute the expected logical-call count per bucket. Save to `tests/fixtures/real-cdr-samples.expected.json`:
+**Pass criterion:** for every tracked queue, `abs(A - B) <= max(0.05 * B, 3)`.
+
+**If fail (any queue):** **PAUSE IMPLEMENTATION AND REDESIGN QUEUE ATTRIBUTION.** Do not continue to Task 1. Investigate the top non-tracked `to.user` values from step 9 — the queue identifier may live in a different field. The pipeline's KPIs depend entirely on this gate; building on a broken assumption produces broken numbers everywhere downstream.
+
+---
+
+### Gate 3: Splits endpoint rate limit (CALIBRATION)
+
+- [ ] **Step 3.1: Probe the splits endpoint**
+
+Write a tiny throwaway TypeScript at `scripts/probe-splits-rate.mjs`:
+
+1. Auth (same pattern as above).
+2. Issue 30 sequential requests to `GET /call_queues/8020/reports/splits/?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&period=day` with no delay between them, all within a 60-second window.
+3. Capture each response: status code, `Retry-After` header if present, the index of the first 429 (if any).
+4. Output JSON.
+
+Run: `node --env-file=.env.local --import tsx scripts/probe-splits-rate.mjs YYYY-MM-DD`
+
+- [ ] **Step 3.2: Calibrate the budget**
+
+Apply this decision tree based on the output:
+
+- **0 of 30 returned 429** → safe to raise `queue_splits.perMinute` to 24 (matching `queue_stats`). Set this in `lib/versature/rate-limiter.ts` and re-run unit tests.
+- **First 429 at request N where N ≤ 12** → **fail.** Lower `queue_splits.perMinute` below N. Reconsider the architecture if N < 6.
+- **First 429 at request N where 13 ≤ N ≤ 30** → keep the conservative 12/min budget; document the observed ceiling at `N - 1`.
+
+**Pass criterion:** the API safely supports at least 12/min (the design's minimum).
+
+**If fail (< 12/min ceiling):** reduce the budget OR redesign the split-fetch schedule to spread requests across multiple GH Actions runs. Discuss before proceeding.
+
+---
+
+### Gate 4: `from_call_id` uniqueness over 30 days (with diagnosis)
+
+- [ ] **Step 4.1: Pull and aggregate**
+
+Write a TypeScript helper at `scripts/check-call-id-uniqueness.mjs`:
+
+1. Auth.
+2. Loop over the 30 most recent dates (one date per request).
+3. For each CDR row, accumulate `Map<from.call_id, Set<call_date>>` where `call_date = toTorontoDate(start_time)`.
+4. Output every entry where Set size > 1.
+
+Run: `node --env-file=.env.local --import tsx scripts/check-call-id-uniqueness.mjs`
+
+- [ ] **Step 4.2: Diagnose any duplicates**
+
+If duplicates are found, do NOT immediately change the schema PK. Instead, categorize each duplicate into one of:
+
+- **Timezone spillover** — the call's `start_time` is near midnight Toronto-local. Inspect the timestamp; if it crosses midnight in one zone but not another, the duplicate is a TZ artifact and the existing Toronto-local `call_date` derivation handles it. **No PK change needed.**
+- **Pagination duplication** — the same `(from.call_id, to.call_id, start_time)` triple appears across two pages. Already handled by the `source_hash` PK. **No PK change needed.**
+- **Multi-segment artifact** — should be impossible given SBC ID format. Investigate if seen.
+- **True ID reuse across days** — Versature legitimately reuses the same ID later. **This is the only case requiring a PK change** to `(from_call_id, call_date)` in `lib/warehouse/schema.sql` plus updates to `build-logical-calls.ts`.
+
+Record the count and category breakdown in the verification artifacts.
+
+**Pass criterion:** zero duplicates, OR all duplicates fall into the "no PK change needed" categories.
+
+**If fail (true ID reuse confirmed):** before continuing, change the schema PK to `(from_call_id, call_date)` in `lib/warehouse/schema.sql`, update the `INSERT INTO logical_calls` SQL in `lib/pipeline/build-logical-calls.ts`, and re-run from Task 2.
+
+---
+
+### Gate 5: DNIS normalization coverage (with allowed-exception list)
+
+- [ ] **Step 5.1: Build the allowed-exception list**
+
+Create `tests/fixtures/dnis-allowed-exceptions.json` with the categories of `to.id` values that legitimately don't normalize to a 10-digit form:
 
 ```json
 {
+  "shortDigitOnly": "values like 40, 211, 8020 — internal extensions or queue IDs",
+  "sipPrefix": "values starting with sip:",
+  "anonymous": ["", "anonymous", "restricted", "private", "unknown"],
+  "examplePatterns": [
+    "^\\d{1,9}$",
+    "^sip:",
+    "^anonymous$"
+  ]
+}
+```
+
+Adjust the `examplePatterns` based on what you actually see in the next step.
+
+- [ ] **Step 5.2: Sample one month of distinct `to.id` values**
+
+Reuse the 30-day pull from Gate 4. Extract distinct non-null `to.id` values, run each through `normalizeDnis()` (paste the function body from `lib/utils/dnis.ts` into a scratch script if Task 3 hasn't shipped yet — but Task 3 IS done, so import it).
+
+- [ ] **Step 5.3: Categorize NULL results**
+
+For each `to.id` where `normalizeDnis(to.id) === null`, classify it:
+
+- Matches an allowed-exception pattern → fine, ignore.
+- Doesn't match → **unexpected NULL**. Either extend `normalizeDnis()` to handle the new pattern, OR add the pattern to the allowed-exception list with a comment explaining why it's a non-customer DNIS.
+
+**Pass criterion:** zero unexpected NULLs after the allowed-exception list is updated.
+
+**If fail (unexpected NULLs remain):** extend the normalizer or the exception list and re-run.
+
+---
+
+### Gate 6: Segment timestamp tie-breaking (INFORMATIONAL)
+
+- [ ] **Step 6.1: Count tied-`start_time` segments**
+
+From the 30-day sample, count `from_call_id` groups where 2+ tracked-queue segments share an exact-equal `start_time`. Record the count.
+
+**Pass criterion:** none — informational only.
+
+**Outcome:**
+- If 0 ties found → flag in the report. The tie-break path won't be exercised by real data; rely on the hand-crafted test in `tests/unit/build-logical-calls.test.ts`.
+- If ≥ 1 tie found → confirms the existing SQL secondary sort (`ORDER BY start_time, source_hash`) handles real data.
+
+---
+
+### Capture and sanitize CDR samples
+
+- [ ] **Step 7.1: Pick a source date for the fixtures**
+
+A recent business day with diverse routing patterns (English, French, AI, AI-overflow, abandoned). Use the same date as Gate 1.1 if possible.
+
+- [ ] **Step 7.2: Create the sanitization script**
+
+Create `scripts/sanitize-cdr-samples.mjs`. Outline:
+
+1. Read raw CDR JSON from stdin (or a file argument).
+2. Select 50–100 segments belonging to ~25 distinct `from.call_id`s with mixed routing patterns. Prioritize: at least 5 English-only, 3 French-only, 3 AI-only, 2 AI-overflow (English-then-AI or French-then-AI), 2 abandoned, plus a few multi-segment calls.
+3. Apply the redaction policy from the spec:
+   - Preserve `to.user` exactly (queue IDs and internal extensions are operational, not customer data).
+   - Optionally apply a fixed timestamp offset (e.g. shift all by `-6 months`). If you do, record the offset in `real-cdr-samples.expected.json`.
+   - Replace `from.id` (caller phone) with a deterministic safe equivalent — same number → same redacted number, but never a real phone. Use `+15555550100`, `+15555550101`, ... pool. Preserve the format characters (parens, dashes, dots).
+   - For any `to.id` that's an external customer DID (not the tracked DNIS, not an internal extension, not a SIP address), redact the same way.
+   - Tracked DNIS (`+16135949199` and variants) — preserve as-is. This is the public DNIS the pipeline tracks. Confirm with the operator before committing.
+   - Replace SBC-style `from.call_id` and `to.call_id` with synthetic IDs that preserve grouping behavior. Maintain the original-to-synthetic mapping deterministically.
+4. Output as NDJSON to stdout (one JSON object per line).
+
+- [ ] **Step 7.3: Run the sanitization**
+
+```
+node --env-file=.env.local --import tsx scripts/sanitize-cdr-samples.mjs YYYY-MM-DD > tests/fixtures/real-cdr-samples.ndjson
+```
+
+Inspect the output by hand for any leakage — open the file and search for any digit string starting with `+1` that's NOT in the `+15555550xxx` redacted pool. Search for SBC IPs like `169.132.`. Search for any string that looks like an unredacted phone number.
+
+- [ ] **Step 7.4: Compute expected counts via TWO methods**
+
+**Method A — manual classification:** read the NDJSON file, group by `from.call_id`, classify each group into a bucket (English / French / AI / AI-overflow / excluded), and count.
+
+**Method B — script-assisted:** create `scripts/breakdown-cdr-samples.mjs` that loads the NDJSON into an in-memory DuckDB, runs the production `build-logical-calls.ts` SQL against it (or imports the function from `lib/pipeline/build-logical-calls.ts`), and prints the per-bucket counts.
+
+```
+node --env-file=.env.local --import tsx scripts/breakdown-cdr-samples.mjs tests/fixtures/real-cdr-samples.ndjson
+```
+
+**Both methods must agree.** Any disagreement is itself a finding — investigate the disagreement before declaring the gate complete.
+
+- [ ] **Step 7.5: Write the expected file**
+
+```json
+{
+  "sourceDate": "YYYY-MM-DD",
+  "sourceTimezone": "America/Toronto",
+  "timestampOffsetApplied": "P-6M",
+  "queues": ["8020", "8021", "8030", "8031"],
+  "trackedDnisNormalized": ["6135949199"],
+  "totalSegments": 87,
   "logicalCallCount": 25,
   "englishCalls": 9,
   "frenchCalls": 4,
   "aiCalls": 3,
-  "aiOverflowCalls": 2
+  "aiOverflowCalls": 2,
+  "computedBy": "manual + scripts/breakdown-cdr-samples.mjs (both agreed)",
+  "scriptAssistedBreakdown": "scripts/breakdown-cdr-samples.mjs (v1)"
 }
 ```
 
-These exact numbers will be the canary in `tests/unit/build-logical-calls.test.ts`.
+These exact numbers become the canary in `tests/unit/build-logical-calls.test.ts` (Task 14).
 
-- [ ] **Step 10: Write the verification report**
+---
 
-Create `docs/versature-task-0-verification.md` with one section per pass criterion, listing the actual measured value and pass/fail status. This is durable evidence that the design's assumptions held when the implementation began.
+### Write the verification artifacts
 
-- [ ] **Step 11: Commit verification artifacts**
+- [ ] **Step 8.1: Write the human-readable report**
+
+Create `docs/versature-task-0-verification.md` with one section per gate. Each section includes:
+
+- Command run (with date arguments)
+- Date / time executed (UTC and Toronto-local)
+- Tenant label (e.g. "neolore.com production")
+- Exact API parameters used
+- Total CDR rows inspected
+- Pagination page count
+- Any observed `Retry-After` or rate-limit response headers
+- Measured value
+- Tolerance (where applicable)
+- Pass / fail
+- Decision taken on any failure (which the spec's failure-decision table maps to)
+
+- [ ] **Step 8.2: Write the machine-readable results**
+
+Create `tests/fixtures/versature-task-0-results.json` with the same data in structured form:
+
+```json
+{
+  "executedAt": { "utc": "...", "toronto": "..." },
+  "executor": "...",
+  "tenant": "...",
+  "gates": {
+    "shape": { "dates": [...], "passed": true, "details": {...} },
+    "queueTouch": { "date": "...", "perQueue": { "8020": { "A": ..., "B": ..., "diff": ..., "tolerance": ..., "passed": true }, ... }, "aggregatePassed": true },
+    "splitsRate": { "date": "...", "first429At": null, "ceiling": "≥30/min", "passed": true, "newBudget": 24 },
+    "callIdUniqueness": { "windowDays": 30, "duplicateCount": 0, "categoryBreakdown": {}, "passed": true },
+    "dnisCoverage": { "windowDays": 30, "totalDistinct": ..., "unexpectedNulls": 0, "passed": true },
+    "tieBreak": { "windowDays": 30, "tieGroupCount": ... }
+  }
+}
+```
+
+---
+
+### Commit
+
+- [ ] **Step 9.1: Commit verification artifacts**
 
 ```
-git add scripts/inspect-queue-shape.mjs tests/fixtures/ docs/versature-task-0-verification.md
-git commit -m "task-0: verify Versature tenant assumptions and capture test fixtures"
+git add scripts/inspect-queue-shape.mjs \
+        scripts/sanitize-cdr-samples.mjs \
+        scripts/breakdown-cdr-samples.mjs \
+        scripts/probe-splits-rate.mjs \
+        scripts/check-call-id-uniqueness.mjs \
+        tests/fixtures/real-cdr-samples.ndjson \
+        tests/fixtures/real-cdr-samples.expected.json \
+        tests/fixtures/dnis-allowed-exceptions.json \
+        tests/fixtures/versature-task-0-results.json \
+        docs/versature-task-0-verification.md
+git commit -m "task-0: verify Versature tenant assumptions and capture sanitized fixtures"
 ```
 
-**HARD GATE:** Do not proceed to Task 1 unless all five Pass criteria are met and the verification report is committed.
+**HARD GATE:** Do not proceed to Task 1 unless gates 1–5 pass per their criteria and the verification artifacts (both `.md` and `.json`) are committed. Gate 6 is informational and does not block.
 
 ---
 

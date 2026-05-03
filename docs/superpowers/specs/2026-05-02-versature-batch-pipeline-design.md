@@ -1044,13 +1044,143 @@ The recoverability of the warehouse is bounded by **two retention windows**: Mot
 
 ### Open questions for Task 0 (re-verification)
 
-These must be confirmed before pipeline build-out begins. The existing `scripts/inspect-cdr-shape.mjs` and a new `scripts/inspect-queue-shape.mjs` cover them. Each item below has a hard pass/fail criterion; failure halts pipeline build-out until resolved.
+These must be confirmed before pipeline build-out begins. The existing `scripts/inspect-cdr-shape.mjs` and a new `scripts/inspect-queue-shape.mjs` cover them. Each gate has a defined pass/fail criterion AND an explicit "if-fail-then" decision. Gate execution always emits TWO artifacts:
 
-1. **Queue-touch inference.** The design assumes `to.user = '8020'` means the segment touched queue 8020. The CDR shape doc supports this for some patterns but not all (some segments have `to.user = '40'` for an internal extension). **Pass criterion:** for a sampled day, the count of distinct `from_call_id`s with at least one `to.user IN (tracked queues)` segment matches the sum of `calls_offered` from `raw_queue_stats` to within ±5%. If the gap is larger, we need a different queue-touch identifier (likely a queue name in a different field).
-2. **Splits endpoint rate limit.** Docs are unclear; we conservatively apply 12/min. **Pass criterion:** issue 30 splits requests in a 60-second window from a clean limiter. If none return 429, raise the budget. If any return 429, lower the budget and document the observed limit.
-3. **`from_call_id` uniqueness over time.** The schema makes `from_call_id` the primary key of `logical_calls`. **Pass criterion:** for a sampled 30-day window, every distinct `from_call_id` belongs to exactly one calendar date. If duplicates appear across dates, the primary key changes to `(from_call_id, call_date)` and we add a runtime warning whenever the same `from_call_id` shows up on more than one date in the same pull.
-4. **DNIS normalization coverage.** Sample one month of `raw_cdr_segments.to_id` values, normalize them, and verify that every form Versature actually returns reduces to a 10-digit canonical form. **Pass criterion:** zero rows where `to_id IS NOT NULL AND normalize_dnis(to_id) IS NULL`. If any rows fail to normalize, extend the function and re-run.
-5. **Segment timestamp tie-breaking.** The `first_tracked_queue` rule depends on a stable ordering when two segments share the same `start_time`. **Pass criterion:** for a sampled day, count `from_call_id` groups where 2+ tracked-queue segments share an exact `start_time`. If any exist, the SQL adds a deterministic secondary sort (`ORDER BY start_time, source_hash`) and we document it.
+- **Human-readable report:** `docs/versature-task-0-verification.md`. Includes audit metadata: command run, executor, timestamp (UTC + Toronto-local), tenant label, queue IDs tested, exact API parameters used, total CDR rows inspected, pagination page count, observed rate-limit response headers if any, pass/fail per gate, and the decision taken on any failure.
+- **Machine-readable results:** `tests/fixtures/versature-task-0-results.json`. Same data in structured form so future CI can ingest it.
+
+Both artifacts must be committed before Task 1 starts.
+
+#### 1. CDR shape unchanged
+
+Run `scripts/inspect-cdr-shape.mjs` against **two sample dates**: one recent **high-volume business date** AND one **low-volume / boundary date** (a Sunday, a holiday, or a date near a DST change). Cost-bound — 2 API calls plus pagination — so always feasible.
+
+**Pass criterion:** both responses show `rowArrayKey: '<array-root>'`, `firstRowKeys` matching `["duration","answer_time","start_time","end_time","from","to"]`, and `from.call_id` is non-null on every sampled row.
+
+**If fail:** stop. Update the spec's "Tenant-Specific Facts" section and the parser before any downstream logic ships.
+
+#### 2. Queue-touch inference (most load-bearing)
+
+The design assumes `to.user == queue_id` means a segment touched that queue. Some segments have `to.user = '40'` (an internal extension) so the assumption is not trivially true.
+
+The verification compares two counts for **the exact same date range, timezone, and tracked-queue set** that the production pipeline will use:
+
+- **A:** count of distinct `from.call_id`s in the CDR feed where at least one segment has `to.user == queueId`, derived from `GET /cdrs/?start_date=DATE&end_date=DATE&limit=2000`.
+- **B:** the queue's own `calls_offered` from `GET /call_queues/{queue}/stats/?start_date=DATE&end_date=DATE`.
+
+**Pass criterion:** for **every** tracked queue, `abs(A - B) <= max(0.05 * B, 3)`. The absolute floor of 3 prevents a low-volume queue (12 calls) from failing on a 1-call discrepancy.
+
+Report **per-queue accuracy** AND **aggregate accuracy across all four queues** in the verification artifacts.
+
+**If fail:** **pause implementation and redesign queue attribution.** Do not proceed to pipeline build-out. The queue-touch inference is the load-bearing identification mechanism; if it's wrong, every KPI is wrong. Likely remediations: try a different `to.*` field, look for queue identifiers in `from.*`, or use a separate routing endpoint.
+
+#### 3. Splits endpoint rate limit (calibration, not pass/fail)
+
+Treat as a **calibration gate**, not a pass/fail gate. The design ships with `queue_splits.perMinute = 12` (conservative). The goal is to confirm the API supports at least that, and document the actual ceiling if higher.
+
+**Procedure:** issue 30 requests to `GET /call_queues/8020/reports/splits/?start_date=DATE&end_date=DATE&period=day` in a 60-second window from a clean limiter. Capture response codes and any `Retry-After` headers.
+
+**Pass criterion:** the API safely supports the design's minimum of **12/min**.
+
+**Calibration outcome:**
+- If 0 of 30 returned 429 → safe to raise `queue_splits.perMinute` to 24 (matching `queue_stats`). Document the new ceiling.
+- If some returned 429 with the first ones at request N (N ≤ 12) → **fail**: lower the budget below N and revisit.
+- If some returned 429 between requests 13 and 30 → keep the conservative 12/min budget; document the observed limit.
+
+**If fail (i.e. < 12/min ceiling):** reduce concurrency / per-minute budget, OR redesign the split-fetch schedule to spread requests across multiple runs.
+
+#### 4. `from_call_id` uniqueness over time
+
+The `logical_calls` PK is `from_call_id`. Verification: pull 30 days of CDRs (one date per request, then aggregate), build a `Map<from_call_id, Set<call_date>>`, and count any entry whose Set size > 1.
+
+**Pass criterion:** zero entries with Set size > 1.
+
+**If duplicates appear, do not jump to a PK change immediately. Diagnose first.** Categorize each duplicate into one of:
+
+- **Timezone spillover** (a call near midnight Toronto-local appears on two adjacent dates because UTC vs. Toronto bin differently) — fixable by ensuring `call_date` is consistently Toronto-local in both writers and readers; no PK change needed.
+- **Pagination duplication** (the same row appears on two pages of `/cdrs/?page=N` due to API instability) — fixable by deduping on `source_hash` at load time, which we already do; no PK change needed.
+- **Multi-segment artifact** (a single call has multiple `from.call_id` references that overlap with a different call's IDs) — should be impossible given the SBC ID format; investigate if seen.
+- **True ID reuse across days** (Versature legitimately reuses an ID later) — this is the only case requiring a PK change to `(from_call_id, call_date)` and downstream SQL updates.
+
+The verification report records the count and category breakdown of any duplicates found.
+
+**If fail (true ID reuse):** change the PK strategy in `lib/warehouse/schema.sql` to `(from_call_id, call_date)`, update `build-logical-calls.ts` SQL, and re-run from Task 2.
+
+#### 5. DNIS normalization coverage
+
+Sample one month of distinct `to.id` values from CDRs, run each through `normalizeDnis()`, and check for failures.
+
+**Pass criterion:** zero **unexpected** failures. Some `to.id` values legitimately don't normalize to a 10-digit form (e.g. internal extensions like `40`, queue IDs like `8020`, SIP addresses like `sip:...`, anonymous markers, or malformed-by-design markers from auto-attendant routing). The verification builds an **explicit allowed-exception list** and counts only failures outside that list.
+
+The current allowed-exception categories are:
+- Pure-digit values shorter than 10 (likely internal extensions or queue IDs)
+- Values starting with `sip:` (SIP addresses)
+- Empty strings, anonymous markers (`anonymous`, `restricted`, `private`)
+
+**Allowed-exception list lives in `tests/fixtures/dnis-allowed-exceptions.json`** and is committed alongside the verification artifacts.
+
+**If fail (unexpected NULL):** extend `normalizeDnis()` to handle the new pattern OR add the new pattern to the allowed-exception list (with a comment explaining why it's a non-customer DNIS) and re-run.
+
+#### 6. Segment timestamp tie-breaking
+
+The `first_tracked_queue` rule depends on a stable ordering when two tracked-queue segments share the same `start_time`. Verification: count `from_call_id` groups where 2+ tracked-queue segments have an exact-equal `start_time`.
+
+**Pass criterion:** none — this is informational. The SQL already includes `ORDER BY start_time, source_hash` as the deterministic secondary sort. The gate confirms whether the tie path is exercised in real data so the test in Task 14 actually covers it.
+
+**If 0 ties found:** flag in the report; the tie-break path is untested against real data. Add a hand-crafted test case to cover it (already covered by `tests/unit/build-logical-calls.test.ts`).
+
+### Fixture privacy
+
+Both fixture files (`real-cdr-samples.ndjson` and `real-cdr-samples.expected.json`) are committed to the public-repo `tests/fixtures/` directory. Apply this redaction policy:
+
+- **Queue IDs (`to.user` matching tracked queues):** preserve exactly. They are operational identifiers, not customer data.
+- **Internal extension `to.user` values (e.g. `40`, `211`):** preserve as-is. They are not customer data.
+- **Timestamps (`start_time`, `end_time`, `answer_time`):** preserve the **shape** (date, time, duration relationships). Optionally, all timestamps in the fixture set may be shifted by a single fixed offset (e.g. all moved 6 months earlier) so the fixture date doesn't reveal a real operational date. Document the offset, if used, in `real-cdr-samples.expected.json`.
+- **Public phone numbers (`from.id` and any `to.id` that's an external customer DID):** **redact deterministically** while preserving normalization behavior. For any real number `+16135551234`, replace digits with safe equivalents that still normalize to a 10-digit form (e.g. `+15555550100`, `+15555550101`, ...). Keep the same `+1`, dashes, parens, or other formatting variants the original used so the DNIS normalization tests still cover the format diversity.
+- **Tracked DNIS (`+16135949199` and variants):** acceptable to preserve as-is since this is the documented public DNIS the entire pipeline tracks. Confirm with the operator before committing.
+- **`from.call_id` and `to.call_id`:** SBC-style call IDs leak SBC IP addresses and timestamps. Replace each with a synthetic ID that preserves shape (`sbcsipuac.2_RED_RED_RED_RED_<seq>_01` or similar). Map original → synthetic deterministically so multi-segment grouping behavior is preserved.
+
+The redaction script (`scripts/sanitize-cdr-samples.mjs`) is part of the Task 0 deliverables.
+
+### Expected results metadata
+
+`tests/fixtures/real-cdr-samples.expected.json` includes metadata so future readers can audit how the expected counts were derived:
+
+```json
+{
+  "sourceDate": "2026-04-30",
+  "sourceTimezone": "America/Toronto",
+  "timestampOffsetApplied": "P-6M",
+  "queues": ["8020", "8021", "8030", "8031"],
+  "trackedDnisNormalized": ["6135949199"],
+  "totalSegments": 87,
+  "logicalCallCount": 25,
+  "englishCalls": 9,
+  "frenchCalls": 4,
+  "aiCalls": 3,
+  "aiOverflowCalls": 2,
+  "computedBy": "manual classification by <operator name>",
+  "scriptAssistedBreakdown": "scripts/breakdown-cdr-samples.mjs (v1)"
+}
+```
+
+The expected counts are computed in two ways and reconciled before commit:
+
+1. **Manual classification** — a human reads the segments and assigns each `from_call_id` to a bucket.
+2. **Script-assisted breakdown** — a small `scripts/breakdown-cdr-samples.mjs` runs the same SQL the pipeline will run, against an in-memory DuckDB loaded with the sanitized fixtures, and emits the per-bucket counts.
+
+The two must agree before the expected file is committed. Any disagreement is itself a finding — investigate before declaring Task 0 complete.
+
+### Summary of failure decisions
+
+| Gate | If fail, then |
+|---|---|
+| 1 — Shape | Update parser before any downstream logic ships. |
+| 2 — Queue-touch | **Pause implementation. Redesign queue attribution.** |
+| 3 — Splits rate | Reduce concurrency / per-minute budget, or redesign split-fetch schedule. |
+| 4 — `from_call_id` uniqueness | Diagnose category first. Only true ID reuse triggers a PK change to `(from_call_id, call_date)`. |
+| 5 — DNIS coverage | Update `normalizeDnis()` OR extend allowed-exception list. |
+| 6 — Tie-break (informational) | Confirm hand-crafted test covers the path. |
 
 ### Risks to watch
 
