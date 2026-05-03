@@ -3,6 +3,7 @@ import { VersatureError } from './types'
 interface CachedToken { accessToken: string; expiresAt: number }
 
 let cached: CachedToken | null = null
+let inflight: Promise<CachedToken> | null = null
 
 const baseUrl = () => {
   const v = process.env.VERSATURE_BASE_URL
@@ -12,8 +13,10 @@ const baseUrl = () => {
 
 export async function getAccessToken(): Promise<string> {
   if (cached && cached.expiresAt > Date.now() + 60_000) return cached.accessToken
-  cached = await fetchNewToken()
-  return cached.accessToken
+  inflight ??= fetchNewToken()
+    .then((t) => { cached = t; return t })
+    .finally(() => { inflight = null })
+  return (await inflight).accessToken
 }
 
 export function invalidateToken(): void {
@@ -49,4 +52,7 @@ async function fetchNewToken(): Promise<CachedToken> {
 }
 
 // Exposed for tests only.
-export function _resetForTests(): void { cached = null }
+export function _resetForTests(): void {
+  cached = null
+  inflight = null
+}

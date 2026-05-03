@@ -12,7 +12,10 @@ export async function buildLogicalCalls(
   w: WarehouseWriter,
   args: BuildLogicalCallsArgs,
 ): Promise<number> {
-  const { en, fr, aiEn, aiFr } = args.queues
+  // Strict DNIS-only inclusion (per code review): a call enters logical_calls only when at
+  // least one segment's normalized to_id matches a tracked DNIS. Queue-touch is no longer
+  // an inclusion path. `args.queues` is retained on the interface for future use.
+  void args.queues
 
   // Validate every entry is a 10-digit string before substituting into SQL.
   for (const d of args.trackedDnisNormalized) {
@@ -33,10 +36,7 @@ export async function buildLogicalCalls(
     inclusion AS (
       SELECT
         from_call_id,
-        bool_or(
-          normalize_dnis(to_id) IN (${dnisList})
-          OR to_user IN ('${en}','${fr}','${aiEn}','${aiFr}')
-        ) AS touched_dnis
+        bool_or(normalize_dnis(to_id) IN (${dnisList})) AS touched_dnis
       FROM segments
       GROUP BY from_call_id
     )

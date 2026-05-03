@@ -244,10 +244,11 @@ CREATE TABLE IF NOT EXISTS logical_calls (
 CREATE INDEX IF NOT EXISTS idx_logical_calls_call_date ON logical_calls(call_date);
 ```
 
-**Inclusion rule** (logical, not literal SQL — the actual SQL form is in Stage 4). A `from_call_id` becomes a `logical_calls` row only if any of its segments satisfies:
+**Inclusion rule** (Revision 2.1 — strict DNIS-only). A `from_call_id` becomes a `logical_calls` row only if at least one of its segments satisfies:
 
-- `normalize_dnis(to_id)` matches any value in the pre-normalized tracked-DNIS list, OR
-- `to_user IN ($QUEUE_EN_MAIN, $QUEUE_FR_MAIN, $QUEUE_AI_OVERFLOW_EN, $QUEUE_AI_OVERFLOW_FR)`
+- `normalize_dnis(to_id)` matches any value in the pre-normalized tracked-DNIS list.
+
+Queue-touch (`to_user IN ($QUEUE_*)`) is no longer an inclusion path. Calls that landed in a tracked queue but did not dial a tracked DNIS (e.g., transfers from another department) are excluded from `logical_calls` and therefore from `total_incoming`. This makes `total_incoming` strictly attributable to the published tracked numbers. Per-queue activity is still observable through `kpi_snapshots.total_queue_activity` and the queue-bucket counts (`english_calls`, `french_calls`, `ai_calls`), which are sourced from `raw_queue_stats.calls_offered`.
 
 The tracked-DNIS list is normalized once at job startup (in TypeScript via `lib/utils/dnis.ts`) and passed to the SQL as a literal array bound parameter — so the SQL only sees pre-canonicalized 10-digit strings. Concretely the Stage 4 SQL is `normalize_dnis(to_id) IN ($TRACKED_DNIS_NORMALIZED)` where `$TRACKED_DNIS_NORMALIZED` is the bound array `['6135949199', ...]`.
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { setupServer } from 'msw/node'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse, delay } from 'msw'
 import { request } from '@/lib/versature/client'
 import { _resetForTests as resetLimiter } from '@/lib/versature/rate-limiter'
 import { _resetForTests as resetAuth } from '@/lib/versature/auth'
@@ -126,5 +126,67 @@ describe('request()', () => {
     await expect(
       request('cdrs', '/cdrs/?start_date=2026-04-30&end_date=2026-04-30'),
     ).rejects.toBeInstanceOf(VersatureError)
+  })
+
+  it('retries transient network errors with backoff, then succeeds', async () => {
+    let calls = 0
+    server.use(
+      http.get('https://test.versature.com/api/cdrs/', () => {
+        calls += 1
+        if (calls < 3) return HttpResponse.error()
+        return HttpResponse.json([])
+      }),
+    )
+    const promise = request('cdrs', '/cdrs/?start_date=2026-04-30&end_date=2026-04-30')
+    await vi.advanceTimersByTimeAsync(2_000 + 8_000 + 200)
+    await promise
+    expect(calls).toBe(3)
+  })
+
+  it('on persistent network errors throws VersatureError after retries', async () => {
+    server.use(
+      http.get('https://test.versature.com/api/cdrs/', () => HttpResponse.error()),
+    )
+    const promise = request('cdrs', '/cdrs/?start_date=2026-04-30&end_date=2026-04-30')
+    promise.catch(() => {})
+    await vi.advanceTimersByTimeAsync(2_000 + 8_000 + 32_000 + 200)
+    await expect(promise).rejects.toBeInstanceOf(VersatureError)
+  })
+
+  it('aborts hung requests after FETCH_TIMEOUT_MS and retries', async () => {
+    let calls = 0
+    server.use(
+      http.get('https://test.versature.com/api/cdrs/', async () => {
+        calls += 1
+        if (calls === 1) {
+          // Hang past the timeout; AbortController should kill us.
+          await delay(120_000)
+          return HttpResponse.json([])
+        }
+        return HttpResponse.json([])
+      }),
+    )
+    const promise = request('cdrs', '/cdrs/?start_date=2026-04-30&end_date=2026-04-30')
+    // Advance past 30s timeout + 2s backoff for retry.
+    await vi.advanceTimersByTimeAsync(35_000)
+    await promise
+    expect(calls).toBe(2)
+  })
+
+  it('on 401, retry waits for rate-limit slot (minIntervalMs)', async () => {
+    const callTimes: number[] = []
+    server.use(
+      http.get('https://test.versature.com/api/cdrs/', () => {
+        callTimes.push(Date.now())
+        if (callTimes.length === 1) return new HttpResponse(null, { status: 401 })
+        return HttpResponse.json([])
+      }),
+    )
+    const promise = request('cdrs', '/cdrs/?start_date=2026-04-30&end_date=2026-04-30')
+    await vi.advanceTimersByTimeAsync(500)
+    await promise
+    expect(callTimes.length).toBe(2)
+    // CDR minIntervalMs = 200; the retry must respect the limiter.
+    expect(callTimes[1] - callTimes[0]).toBeGreaterThanOrEqual(200)
   })
 })

@@ -90,7 +90,7 @@ describe('buildLogicalCalls (Revision 2)', () => {
     await db.close()
   })
 
-  it('Tracked-queue-only call (no DNIS) is included via secondary inclusion path', async () => {
+  it('Tracked-queue-only call (no DNIS match) is EXCLUDED — strict DNIS-only inclusion', async () => {
     const db = await makeTestWarehouse()
     await seed(db, [
       { from_call_id: 'q1', to_user: QUEUES.aiEn, to_id: '+15551234567', start_time: '2026-04-30T12:00:00' },
@@ -98,7 +98,7 @@ describe('buildLogicalCalls (Revision 2)', () => {
     const w = wrap(db)
     await buildLogicalCalls(w, { pullRunId: 'r', window: { start: '2026-04-30', end: '2026-04-30' }, queues: QUEUES, trackedDnisNormalized: TRACKED_DNIS })
     const c = await w.one<{ c: number }>('SELECT count(*) as c FROM logical_calls')
-    expect(Number(c?.c)).toBe(1)
+    expect(Number(c?.c)).toBe(0)
     await db.close()
   })
 

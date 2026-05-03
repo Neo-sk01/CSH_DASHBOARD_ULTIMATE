@@ -161,6 +161,108 @@ describe('buildSnapshots (Revision 2)', () => {
     await db.close()
   })
 
+  it('weekly snapshot SUMS across multi-day windows (asymmetric per-day counts)', async () => {
+    // ISO week of 2026-04-27 (Monday). Seed Mon/Tue/Wed with different counts.
+    const db = await makeTestWarehouse()
+    await seedLogical(db, [
+      { from_call_id: 'm1', call_date: '2026-04-27' },
+      { from_call_id: 'm2', call_date: '2026-04-27' },
+      { from_call_id: 'm3', call_date: '2026-04-27' },
+      { from_call_id: 'm4', call_date: '2026-04-27' },
+      { from_call_id: 'm5', call_date: '2026-04-27' },               // Mon = 5
+      { from_call_id: 't1', call_date: '2026-04-28' },
+      { from_call_id: 't2', call_date: '2026-04-28' },
+      { from_call_id: 't3', call_date: '2026-04-28' },
+      { from_call_id: 't4', call_date: '2026-04-28' },
+      { from_call_id: 't5', call_date: '2026-04-28' },
+      { from_call_id: 't6', call_date: '2026-04-28' },
+      { from_call_id: 't7', call_date: '2026-04-28' },               // Tue = 7
+      { from_call_id: 'w1', call_date: '2026-04-29' },
+      { from_call_id: 'w2', call_date: '2026-04-29' },
+      { from_call_id: 'w3', call_date: '2026-04-29' },               // Wed = 3
+    ])
+    await seedQueueStats(db, [
+      { queue_id: '8020', business_date: '2026-04-27', calls_offered: 10 },
+      { queue_id: '8020', business_date: '2026-04-28', calls_offered: 20 },
+      { queue_id: '8020', business_date: '2026-04-29', calls_offered: 30 },
+      { queue_id: '8021', business_date: '2026-04-28', calls_offered: 5 },
+      { queue_id: '8030', business_date: '2026-04-27', calls_offered: 2 },
+      { queue_id: '8030', business_date: '2026-04-28', calls_offered: 1 },
+    ])
+    const w = wrap(db)
+    await buildSnapshots(w, {
+      pullRunId: 'r1',
+      window: { start: '2026-04-27', end: '2026-04-29' },
+      forceFinalize: true,
+      queues: QUEUES,
+    })
+    const weekly = await w.one<any>(
+      `SELECT * FROM kpi_snapshots
+       WHERE period='weekly' AND period_start='2026-04-27' AND include_weekends=true`,
+    )
+    expect(Number(weekly?.total_incoming)).toBe(15)         // 5+7+3
+    expect(Number(weekly?.english_calls)).toBe(60)          // 10+20+30
+    expect(Number(weekly?.french_calls)).toBe(5)            // 0+5+0
+    expect(Number(weekly?.ai_calls)).toBe(3)                // 2+1+0
+    expect(Number(weekly?.ai_overflow_calls)).toBe(3)
+    await db.close()
+  })
+
+  it('monthly snapshot SUMS across multi-day windows', async () => {
+    const db = await makeTestWarehouse()
+    await seedLogical(db, [
+      { from_call_id: 'a1', call_date: '2026-04-02' },
+      { from_call_id: 'a2', call_date: '2026-04-02' },                // Apr 2 = 2
+      { from_call_id: 'b1', call_date: '2026-04-15' },                // Apr 15 = 1
+      { from_call_id: 'c1', call_date: '2026-04-29' },
+      { from_call_id: 'c2', call_date: '2026-04-29' },
+      { from_call_id: 'c3', call_date: '2026-04-29' },
+      { from_call_id: 'c4', call_date: '2026-04-29' },                // Apr 29 = 4
+    ])
+    await seedQueueStats(db, [
+      { queue_id: '8020', business_date: '2026-04-02', calls_offered: 100 },
+      { queue_id: '8020', business_date: '2026-04-15', calls_offered: 50 },
+      { queue_id: '8020', business_date: '2026-04-29', calls_offered: 25 },
+    ])
+    const w = wrap(db)
+    await buildSnapshots(w, {
+      pullRunId: 'r1',
+      window: { start: '2026-04-02', end: '2026-04-29' },
+      forceFinalize: true,
+      queues: QUEUES,
+    })
+    const monthly = await w.one<any>(
+      `SELECT * FROM kpi_snapshots
+       WHERE period='monthly' AND period_start='2026-04-01' AND include_weekends=true`,
+    )
+    expect(Number(monthly?.total_incoming)).toBe(7)         // 2+1+4
+    expect(Number(monthly?.english_calls)).toBe(175)        // 100+50+25
+    await db.close()
+  })
+
+  it('weekly total_queue_activity sums per queue across the week', async () => {
+    const db = await makeTestWarehouse()
+    await seedLogical(db, [{ from_call_id: 'a', call_date: '2026-04-27' }])
+    await seedQueueStats(db, [
+      { queue_id: '8020', business_date: '2026-04-27', calls_offered: 10 },
+      { queue_id: '8020', business_date: '2026-04-28', calls_offered: 20 },
+      { queue_id: '8021', business_date: '2026-04-29', calls_offered: 7 },
+    ])
+    const w = wrap(db)
+    await buildSnapshots(w, {
+      pullRunId: 'r',
+      window: { start: '2026-04-27', end: '2026-04-29' },
+      forceFinalize: true,
+      queues: QUEUES,
+    })
+    const row = await w.one<{ tqa: string }>(
+      `SELECT total_queue_activity::VARCHAR as tqa FROM kpi_snapshots
+       WHERE period='weekly' AND period_start='2026-04-27' AND include_weekends=true`,
+    )
+    expect(row?.tqa).toBe('[{"k":"8020","v":30},{"k":"8021","v":7}]')
+    await db.close()
+  })
+
   it('Real-sample canary: combines real-cdr-samples + queue-stats-samples → expected-snapshot', async () => {
     const expected = JSON.parse(await fs.readFile(path.join(process.cwd(), 'tests/fixtures/expected-snapshot.json'), 'utf8'))
     const queueStatsFx = JSON.parse(await fs.readFile(path.join(process.cwd(), 'tests/fixtures/queue-stats-samples.json'), 'utf8'))

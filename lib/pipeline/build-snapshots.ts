@@ -61,41 +61,35 @@ async function writeSnapshot(
     [period, periodStart, includeWeekends],
   )
 
+  // Aggregate across the entire period (one row per snapshot key). For daily, the period is
+  // a single date so the SUMs collapse to that date. For weekly/monthly, the SUMs roll up
+  // every day in [period_start, period_end] that has data.
   const sql = `
     WITH dnis_total AS (
-      SELECT
-        call_date,
-        count(*) AS total_incoming
+      SELECT count(*) AS total_incoming
       FROM logical_calls
       WHERE call_date BETWEEN ? AND ?
         AND touched_dnis = true
         ${weekendFilterLC}
-      GROUP BY call_date
     ),
     queue_buckets AS (
       SELECT
-        business_date AS call_date,
         sum(calls_offered) FILTER (WHERE queue_id = ?) AS english_calls,
         sum(calls_offered) FILTER (WHERE queue_id = ?) AS french_calls,
         sum(calls_offered) FILTER (WHERE queue_id IN (?, ?)) AS ai_calls
       FROM raw_queue_stats
       WHERE business_date BETWEEN ? AND ?
         ${weekendFilterQS}
-      GROUP BY business_date
     ),
     queue_activity AS (
-      SELECT
-        business_date AS call_date,
-        to_json(list(struct_pack(k := queue_id, v := calls_offered) ORDER BY queue_id)) AS total_queue_activity
-      FROM raw_queue_stats
-      WHERE business_date BETWEEN ? AND ?
-        ${weekendFilterQS}
-      GROUP BY business_date
-    ),
-    all_dates AS (
-      SELECT call_date FROM dnis_total
-      UNION
-      SELECT call_date FROM queue_buckets
+      SELECT to_json(list(struct_pack(k := queue_id, v := offered) ORDER BY queue_id)) AS total_queue_activity
+      FROM (
+        SELECT queue_id, sum(calls_offered) AS offered
+        FROM raw_queue_stats
+        WHERE business_date BETWEEN ? AND ?
+          ${weekendFilterQS}
+        GROUP BY queue_id
+      )
     ),
     candidate AS (
       SELECT
@@ -112,10 +106,10 @@ async function writeSnapshot(
         (${isFinalizedExpr}) AS is_finalized,
         now() AS computed_at,
         ?::VARCHAR AS pull_run_id
-      FROM all_dates d
-      LEFT JOIN dnis_total t USING (call_date)
-      LEFT JOIN queue_buckets b USING (call_date)
-      LEFT JOIN queue_activity q USING (call_date)
+      FROM (SELECT 1) AS _
+      LEFT JOIN dnis_total t ON true
+      LEFT JOIN queue_buckets b ON true
+      LEFT JOIN queue_activity q ON true
     )
     INSERT OR REPLACE INTO kpi_snapshots
     SELECT c.* FROM candidate c
