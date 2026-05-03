@@ -1,0 +1,53 @@
+{
+  "_purpose": "Per-queue, per-business-date queue_stats fixtures used by Task 15's build-snapshots tests. Numbers come from the live tenant on 2026-04-16 (the same date as real-cdr-samples.ndjson), captured during Task 0 Gate 2 verification.",
+  "sourceDate": "2026-04-16",
+  "queues": {
+    "EN": "8020",
+    "FR": "8021",
+    "AI_EN": "8030",
+    "AI_FR": "8031"
+  },
+  "rows": [
+    {
+      "queue_id": "8020",
+      "business_date": "2026-04-16",
+      "calls_offered": 64,
+      "abandoned_calls": null,
+      "abandoned_rate": null,
+      "avg_talk_seconds": null,
+      "avg_handle_seconds": null,
+      "raw_payload": null,
+      "_note": "Captured by Gate 2 verification. abandoned_calls etc. were not part of Gate 2's payload capture; Task 13's loadQueueStats fetches them in production."
+    },
+    {
+      "queue_id": "8021",
+      "business_date": "2026-04-16",
+      "calls_offered": 1,
+      "abandoned_calls": null,
+      "abandoned_rate": null,
+      "avg_talk_seconds": null,
+      "avg_handle_seconds": null,
+      "raw_payload": null
+    },
+    {
+      "queue_id": "8030",
+      "business_date": "2026-04-16",
+      "calls_offered": 36,
+      "abandoned_calls": null,
+      "abandoned_rate": null,
+      "avg_talk_seconds": null,
+      "avg_handle_seconds": null,
+      "raw_payload": null
+    },
+    {
+      "queue_id": "8031",
+      "business_date": "2026-04-16",
+      "calls_offered": 0,
+      "abandoned_calls": null,
+      "abandoned_rate": null,
+      "avg_talk_seconds": null,
+      "avg_handle_seconds": null,
+      "raw_payload": null
+    }
+  ]
+}

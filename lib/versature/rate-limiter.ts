@@ -8,7 +8,7 @@ interface Budget {
 const BUDGETS: Record<EndpointName, Budget> = {
   cdrs:         { perMinute: 12, minIntervalMs: 200 },  // docs say 5/s, 15/min — we sit below
   queue_stats:  { perMinute: 24, minIntervalMs: 100 },  // docs say 10/s, 30/min — below
-  queue_splits: { perMinute: 12, minIntervalMs: 200 },  // conservative until verified in Task 0 step 4
+  queue_splits: { perMinute: 24, minIntervalMs: 100 },  // Task 0 Gate 3 verified: 30 requests in 24.6s, 0 x 429
 }
 
 interface Bucket {

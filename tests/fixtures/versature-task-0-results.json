@@ -1,0 +1,94 @@
+{
+  "_purpose": "Machine-readable Task 0 verification results (spec Revision 2). Counterpart to the human-readable docs/versature-task-0-verification.md. Used as the regression-guard baseline for monthly CI runs of inspect-queue-shape.mjs.",
+  "executedAt": {
+    "utcStart": "2026-05-03T08:11:00Z",
+    "utcEnd": "2026-05-03T11:00:00Z",
+    "torontoStart": "2026-05-03T04:11:00-04:00"
+  },
+  "executor": "automated agent (subagent under Claude Code SDK)",
+  "tenant": "neolore.com",
+  "apiVersion": "application/vnd.integrate.v1.10.0+json",
+  "queueIds": {
+    "EN": "8020",
+    "FR": "8021",
+    "AI_EN": "8030",
+    "AI_FR": "8031"
+  },
+  "trackedDnisNormalized": ["6135949199"],
+  "gates": {
+    "shape": {
+      "datesProbed": ["2026-04-16", "2026-04-30"],
+      "rowArrayKey": "<array-root>",
+      "firstRowKeys": ["duration", "answer_time", "start_time", "end_time", "from", "to"],
+      "passed": true,
+      "_note": "Apr 16 worked; Apr 30 initially errored on limit=1000 (API max is exclusive of 1000); the inspect script was patched in this commit to use limit=999 + pagination. Both dates now pass."
+    },
+    "queueTouch": {
+      "date": "2026-04-16",
+      "totalCdrSegments": 480,
+      "perQueue": [
+        { "queueId": "8020", "A_cdrTouchCount": 1,  "B_callsOffered": 64, "diff": 63, "tolerance": 3.2, "passed": false },
+        { "queueId": "8021", "A_cdrTouchCount": 0,  "B_callsOffered": 1,  "diff": 1,  "tolerance": 3,   "passed": true },
+        { "queueId": "8030", "A_cdrTouchCount": 19, "B_callsOffered": 36, "diff": 17, "tolerance": 3,   "passed": false },
+        { "queueId": "8031", "A_cdrTouchCount": 0,  "B_callsOffered": 0,  "diff": 0,  "tolerance": 3,   "passed": true }
+      ],
+      "aggregate": { "totalA": 20, "totalB": 101, "diff": 81, "tolerance": 5.05, "passed": false },
+      "topUntrackedToUser": [
+        { "user": "78", "count": 32 },
+        { "user": "53", "count": 28 },
+        { "user": "8007", "count": 25, "_note": "non-tracked queue-shaped extension; unknown role" },
+        { "user": "63", "count": 20 },
+        { "user": "58", "count": 7 },
+        { "user": "59", "count": 6 }
+      ],
+      "passed": false,
+      "verdict": "Gate 2 fails as the design feared possible. CDR to.user is the segment's terminal destination, not its queue traversal. Per the spec failure decision, the design has been redesigned (Revision 2): queue buckets now source from raw_queue_stats. This file's per-queue numbers serve as the regression-guard baseline. Drift from these numbers in monthly CI runs triggers an investigation but does NOT block builds."
+    },
+    "splitsRate": {
+      "date": "2026-04-16",
+      "probeQueueId": "8020",
+      "totalRequests": 30,
+      "windowDurationMs": 24631,
+      "status429Count": 0,
+      "ceiling": ">30/min",
+      "decision": "raise queue_splits.perMinute from 12 to 24 in lib/versature/rate-limiter.ts",
+      "passed": true
+    },
+    "callIdUniqueness": {
+      "dateRange": { "start": "2026-04-04", "end": "2026-05-03" },
+      "totalDates": 30,
+      "totalCdrSegments": 6737,
+      "distinctCallIds": 6277,
+      "duplicateCount": 0,
+      "passed": true,
+      "_note": "from_call_id PK in lib/warehouse/schema.sql.logical_calls is retained."
+    },
+    "dnisCoverage": {
+      "totalDistinctNonNullToIds": 1087,
+      "normalizedOk": 1075,
+      "allowedExceptionMatches": 5,
+      "unexpectedNullsResolved": 7,
+      "finalUnresolvedCount": 0,
+      "passed": true,
+      "_note": "7 unexpected NULLs were international/star-code patterns added to dnis-allowed-exceptions.json. Normalizer logic unchanged (correct behaviour: these are not NANP numbers)."
+    },
+    "tieBreak": {
+      "windowDays": 30,
+      "tieGroupCount": 0,
+      "informationalOnly": true,
+      "_note": "No tied start_time observed. Stage 4 SQL no longer has a first_tracked CTE under Revision 2, so the secondary sort is not exercised anyway."
+    }
+  },
+  "designChangesTriggered": [
+    "spec Revision 2: kpi_snapshots queue buckets sourced from raw_queue_stats",
+    "spec Revision 2: logical_calls drops touched_queues, first_tracked_queue, touched_ai, is_english, is_french, is_ai, is_ai_overflow",
+    "spec Revision 2: ai_overflow_calls = ai_calls (AI queues are overflow-only by tenant policy)",
+    "spec Revision 2: Gate 2 reframed as monthly regression guard",
+    "lib/versature/rate-limiter.ts: queue_splits.perMinute 12 -> 24",
+    "tests/fixtures/dnis-allowed-exceptions.json: extended with international and star-code patterns",
+    "scripts/inspect-cdr-shape.mjs: paginated; uses /cdrs/ instead of /cdrs/users/; limit 999 (API max is exclusive of 1000)"
+  ],
+  "outOfScope": [
+    "8007: appeared 25 times as to.user but is not a configured tracked queue. Treated as unknown / not tracked. If Versature/admin confirms it's a business queue, add as a configured queue with a named role."
+  ]
+}

@@ -137,24 +137,38 @@ console.error(`Authenticated. Token scope: ${tokenPayload.scope ?? 'not provided
 // --- Fetch CDRs ---
 console.error(`Fetching CDRs for ${date}...`)
 
-const cdrResponse = await fetch(
-  `${baseUrl}/cdrs/users/?start_date=${date}&end_date=${date}`,
-  {
-    headers: {
-      Accept: apiVersion,
-      Authorization: `Bearer ${accessToken}`,
+// Paginate via &page=N; API returns plain array each page
+let allRows = []
+let page = 1
+const PAGE_SIZE = 1000
+while (true) {
+  const cdrResponse = await fetch(
+    `${baseUrl}/cdrs/?start_date=${date}&end_date=${date}&limit=${PAGE_SIZE}&page=${page}`,
+    {
+      headers: {
+        Accept: apiVersion,
+        Authorization: `Bearer ${accessToken}`,
+      },
     },
-  },
-)
+  )
 
-if (!cdrResponse.ok) {
-  const body = await cdrResponse.text()
-  throw new Error(`CDR fetch failed (${cdrResponse.status}): ${body}`)
+  if (!cdrResponse.ok) {
+    const body = await cdrResponse.text()
+    throw new Error(`CDR fetch failed (${cdrResponse.status}): ${body}`)
+  }
+
+  const pagePayload = await cdrResponse.json()
+  const pageRows = Array.isArray(pagePayload) ? pagePayload : (pagePayload.result ?? [])
+  allRows = allRows.concat(pageRows)
+  console.error(`  Page ${page}: ${pageRows.length} rows (total so far: ${allRows.length})`)
+  if (pageRows.length < PAGE_SIZE) break
+  page++
 }
 
-const payload = await cdrResponse.json()
-const pageKeys = Array.isArray(payload) ? ['<array-root>'] : Object.keys(payload)
-const { rowArrayKey, rows } = findPrimaryRowArray(payload)
+const payload = allRows
+const pageKeys = ['<array-root>']
+const rowArrayKey = '<array-root>'
+const rows = allRows
 const firstRow = rows[0] ?? null
 const sampleRows = rows.slice(0, 50)
 
