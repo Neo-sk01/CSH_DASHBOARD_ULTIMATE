@@ -1,3 +1,4 @@
+import { pathToFileURL } from 'node:url'
 import { format, parseISO, startOfMonth, subDays, lastDayOfMonth } from 'date-fns'
 import { tz } from '@date-fns/tz'
 
@@ -24,7 +25,7 @@ export function resolveWindow(env: NodeJS.ProcessEnv, now: Date = new Date()): R
   const start = env.PULL_WINDOW_START?.trim() || ''
   const end   = env.PULL_WINDOW_END?.trim()   || ''
   const trigger = env.PULL_TRIGGER || ''
-  const cron = env.PULL_SCHEDULE_CRON?.trim() || ''
+  const cron = (env.PULL_SCHEDULE_CRON?.trim() || '').replace(/\s+/g, ' ')
   const force = env.PULL_FORCE_FINALIZE === 'true'
 
   if (start && end) {
@@ -159,6 +160,6 @@ async function main() {
   await w.close()
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => { console.error(e); process.exit(1) })
 }
