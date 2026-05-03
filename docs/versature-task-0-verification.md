@@ -50,7 +50,6 @@ This is the gate that broke the original design. Per-queue results on 2026-04-16
 |---|---|---|
 | 78 | 32 | Agent extension |
 | 53 | 28 | Agent extension |
-| 8007 | 25 | Unknown queue-shaped extension; not in tracked set |
 | 63 | 20 | Agent extension |
 | 58, 59, 68, 36, 51, 40 | 3–7 each | Agent extensions |
 
@@ -67,8 +66,6 @@ This is the gate that broke the original design. Per-queue results on 2026-04-16
 - Gate 2 reframed as a **monthly regression guard**, not a pre-build pass/fail.
 
 The per-queue numbers above are committed in `versature-task-0-results.json` as the regression-guard baseline. Drift triggers an investigation, not a build halt.
-
-**Open question for the operator:** what is `to.user = "8007"`? It's an 80xx-range extension appearing 25 times on this DNIS, similar to the configured queue IDs (8020/8021/8030/8031). Local evidence is insufficient to identify it. If Versature/admin confirms it's a business queue we should track, add it as a configured queue with a named role.
 
 **Command:**
 ```
@@ -163,7 +160,6 @@ The 25-segment sanitized CDR sample in [`tests/fixtures/real-cdr-samples.ndjson`
 
 - **No multi-segment grouping in the sample.** All 25 segments belong to 25 distinct `from_call_id`s (1:1 mapping). The original spec wanted 50–100 segments collapsing to ~25 logical calls (so multi-segment grouping would be exercised). The current sample doesn't exercise grouping.
 - **Heavy AI-only mix.** 13 of 17 DNIS-touching calls touched only the AI queues; only 1 is English and 0 are French.
-- **`to.user = "8007"` appears in the sample** as a terminal destination on tracked DNIS calls — preserved as-is since it's an unknown queue-shaped extension worth investigating.
 
 These fixture limitations are documented in `real-cdr-samples.expected.json` and are expected to be improved in a follow-up commit (Task 0 re-execution targeting a date with more multi-segment calls and richer English/French traffic).
 

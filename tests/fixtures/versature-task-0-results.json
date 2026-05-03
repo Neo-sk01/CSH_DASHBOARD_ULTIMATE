@@ -36,7 +36,6 @@
       "topUntrackedToUser": [
         { "user": "78", "count": 32 },
         { "user": "53", "count": 28 },
-        { "user": "8007", "count": 25, "_note": "non-tracked queue-shaped extension; unknown role" },
         { "user": "63", "count": 20 },
         { "user": "58", "count": 7 },
         { "user": "59", "count": 6 }
@@ -88,7 +87,5 @@
     "tests/fixtures/dnis-allowed-exceptions.json: extended with international and star-code patterns",
     "scripts/inspect-cdr-shape.mjs: paginated; uses /cdrs/ instead of /cdrs/users/; limit 999 (API max is exclusive of 1000)"
   ],
-  "outOfScope": [
-    "8007: appeared 25 times as to.user but is not a configured tracked queue. Treated as unknown / not tracked. If Versature/admin confirms it's a business queue, add as a configured queue with a named role."
-  ]
+  "outOfScope": []
 }
