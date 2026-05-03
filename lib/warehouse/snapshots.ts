@@ -16,7 +16,7 @@ export async function getSnapshot(args: {
   return w.getSnapshot(args)
 }
 
-export async function getMostRecentFinalizedDay(): Promise<string | null> {
+export async function getMostRecentFinalizedDay(): Promise<Date | string | null> {
   const w = await reader()
   return w.getMostRecentFinalizedDay()
 }

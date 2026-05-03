@@ -5,13 +5,15 @@ import { NotDownloadedYet } from '@/components/NotDownloadedYet'
 
 export const dynamic = 'force-dynamic'
 
+const VALID_PERIODS = new Set<Period>(['daily', 'weekly', 'monthly'])
+
 interface PageProps {
   searchParams: Promise<{ period?: string; includeWeekends?: string }>
 }
 
 export default async function Page({ searchParams }: PageProps) {
   const { period: periodParam, includeWeekends: incParam } = await searchParams
-  const period: Period = (periodParam as Period) ?? 'daily'
+  const period: Period = VALID_PERIODS.has(periodParam as Period) ? (periodParam as Period) : 'daily'
   const includeWeekends = incParam === 'true'
 
   const periodStart = resolvePeriodStart(period, new Date())

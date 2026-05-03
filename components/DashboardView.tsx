@@ -1,5 +1,5 @@
 import type { SnapshotRow } from '@/lib/warehouse/client'
-import type { Period } from '@/lib/utils/dates'
+import { formatDate, formatTimestamp, type Period } from '@/lib/utils/dates'
 import { KpiCard } from './KpiCard'
 import { PeriodToggle } from './PeriodToggle'
 import { WeekendToggle } from './WeekendToggle'
@@ -10,21 +10,22 @@ export function DashboardView({
   snapshot: SnapshotRow
   period: Period
   includeWeekends: boolean
-  latestPullAt: string | null
+  latestPullAt: Date | string | null
 }) {
   return (
     <main className="mx-auto max-w-6xl px-6 py-8">
       <header className="mb-8 flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-semibold">CSH Call Analytics</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            Showing snapshot for {snapshot.period_start} ({snapshot.is_finalized ? 'finalized' : 'provisional'})
-            {' · '} pulled {latestPullAt ?? '(unknown)'}
+          <p className="mt-1 text-sm text-slate-600">
+            Showing snapshot for {formatDate(snapshot.period_start)}{' '}
+            ({snapshot.is_finalized ? 'finalized' : 'provisional'})
+            {' · '} pulled {formatTimestamp(latestPullAt)}
           </p>
         </div>
         <div className="flex flex-col items-end gap-2">
-          <PeriodToggle current={period} />
-          <WeekendToggle current={includeWeekends} />
+          <PeriodToggle current={period} includeWeekends={includeWeekends} />
+          <WeekendToggle current={includeWeekends} period={period} />
         </div>
       </header>
 

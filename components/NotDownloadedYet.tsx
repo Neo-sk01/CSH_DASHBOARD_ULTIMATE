@@ -1,12 +1,12 @@
-import type { Period } from '@/lib/utils/dates'
+import { formatDate, formatTimestamp, type Period } from '@/lib/utils/dates'
 
 export function NotDownloadedYet({
   period, periodStart, latestPullAt, finalizedDay,
 }: {
   period: Period
   periodStart: string
-  latestPullAt: string | null
-  finalizedDay: string | null
+  latestPullAt: Date | string | null
+  finalizedDay: Date | string | null
 }) {
   return (
     <main className="mx-auto max-w-2xl px-6 py-16">
@@ -17,10 +17,10 @@ export function NotDownloadedYet({
           The next nightly pull runs at 08:00 UTC (≈03:00–04:00 ET, depending on DST).
         </p>
         <dl className="mt-6 grid grid-cols-2 gap-y-2 text-sm">
-          <dt className="text-slate-500">Last successful pull</dt>
-          <dd>{latestPullAt ?? '(none yet)'}</dd>
-          <dt className="text-slate-500">Most recent finalized day</dt>
-          <dd>{finalizedDay ?? '(none yet)'}</dd>
+          <dt className="text-slate-600">Last successful pull</dt>
+          <dd>{formatTimestamp(latestPullAt)}</dd>
+          <dt className="text-slate-600">Most recent finalized day</dt>
+          <dd>{formatDate(finalizedDay)}</dd>
         </dl>
       </div>
     </main>

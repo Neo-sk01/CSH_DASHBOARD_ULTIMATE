@@ -1,10 +1,13 @@
 import { Database } from 'duckdb-async'
 import { NORMALIZE_DNIS_UDF_SQL } from '@/lib/utils/dnis'
 
+// DuckDB returns DATE/TIMESTAMP columns as JS Date objects at runtime.
+// Surface that fact in the type so callers must format defensively
+// (use lib/utils/dates.ts: formatDate / formatTimestamp).
 export type SnapshotRow = {
   period: 'daily' | 'weekly' | 'monthly'
-  period_start: string
-  period_end: string
+  period_start: Date | string
+  period_end: Date | string
   include_weekends: boolean
   total_incoming: number
   english_calls: number
@@ -13,18 +16,18 @@ export type SnapshotRow = {
   ai_overflow_calls: number
   total_queue_activity: unknown
   is_finalized: boolean
-  computed_at: string
+  computed_at: Date | string
   pull_run_id: string
 }
 
 export type PullRunRow = {
   pull_run_id: string
   triggered_by: string
-  triggered_at: string
-  finished_at: string | null
+  triggered_at: Date | string
+  finished_at: Date | string | null
   status: string
-  window_start: string
-  window_end: string
+  window_start: Date | string
+  window_end: Date | string
   cdr_segments_count: number | null
   queue_stats_count: number | null
   splits_count: number | null
@@ -34,10 +37,13 @@ export type PullRunRow = {
   finalized_month: string | null
 }
 
-// Read-only surface used by app/ and components/
+// Read-only surface used by app/ and components/.
+// DATE / TIMESTAMP columns surface as Date | string (DuckDB returns Date
+// at runtime; the helper just passes the row through). Format with
+// lib/utils/dates.ts: formatDate / formatTimestamp.
 export interface WarehouseReader {
   getSnapshot(args: { period: SnapshotRow['period']; periodStart: string; includeWeekends: boolean }): Promise<SnapshotRow | null>
-  getMostRecentFinalizedDay(): Promise<string | null>
+  getMostRecentFinalizedDay(): Promise<Date | string | null>
   getLatestSuccessfulPull(): Promise<PullRunRow | null>
   getRecentPullRuns(limit: number): Promise<PullRunRow[]>
   close(): Promise<void>
@@ -97,7 +103,7 @@ export function wrap(db: Database): WarehouseWriter {
          WHERE period = 'daily' AND is_finalized = true
          ORDER BY period_start DESC LIMIT 1`,
       )
-      return ((rows[0] as { period_start?: string } | undefined)?.period_start) ?? null
+      return ((rows[0] as { period_start?: Date | string } | undefined)?.period_start) ?? null
     },
     async getLatestSuccessfulPull() {
       const rows = await db.all(

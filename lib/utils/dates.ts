@@ -70,3 +70,23 @@ export function isWeekend(date: string): boolean {
 export function toTorontoDate(isoTimestamp: string): string {
   return format(parseISO(isoTimestamp), 'yyyy-MM-dd', { in: tz(TZ) })
 }
+
+/**
+ * Render a Date or ISO string as `YYYY-MM-DD HH:mm UTC` for operator-facing UI.
+ * DuckDB returns Date objects for DATE/TIMESTAMP columns regardless of
+ * the helper's TS return type, so callers may pass either shape.
+ */
+export function formatTimestamp(value: Date | string | null | undefined): string {
+  if (value == null) return '(unknown)'
+  const d = value instanceof Date ? value : parseISO(value)
+  return `${format(d, 'yyyy-MM-dd HH:mm', { in: tz('UTC') })} UTC`
+}
+
+/**
+ * Render a DATE-only value (Date or ISO string) as `YYYY-MM-DD`.
+ */
+export function formatDate(value: Date | string | null | undefined): string {
+  if (value == null) return '(none yet)'
+  const d = value instanceof Date ? value : parseISO(value)
+  return format(d, 'yyyy-MM-dd')
+}
