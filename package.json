@@ -7,26 +7,31 @@
     "build": "next build",
     "start": "next start",
     "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
     "test:watch": "vitest",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
     "db:migrate": "node --env-file=.env.local --import tsx scripts/migrate.ts",
-    "discover:queues": "node --env-file=.env.local --import tsx scripts/discover-queues.ts",
-    "audit:day": "node --env-file=.env.local --import tsx scripts/audit-day.ts"
+    "pull": "node --env-file=.env.local --import tsx jobs/run-pull.ts",
+    "audit": "node --env-file=.env.local --import tsx scripts/audit-day.ts"
   },
   "dependencies": {
     "@date-fns/tz": "^1.2.0",
     "date-fns": "^4.1.0",
+    "duckdb-async": "^1.1.3",
     "next": "16.1.1",
-    "pg": "^8.13.1",
     "react": "19.2.0",
     "react-dom": "19.2.0",
-    "recharts": "2.15.4"
+    "recharts": "2.15.4",
+    "ulid": "^2.3.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.9",
     "@types/node": "^22.10.1",
-    "@types/pg": "^8.11.10",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
+    "msw": "^2.4.9",
     "postcss": "^8.5.1",
     "tailwindcss": "^4.1.9",
     "tsx": "^4.19.2",
