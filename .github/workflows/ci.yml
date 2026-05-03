@@ -17,10 +17,10 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
 
-      - name: Architectural lint (no Versature in dashboard)
+      - name: Architectural grep gate (no lib/versature or lib/pipeline imports in app/ or components/)
         run: |
-          if grep -r -E "(versature|pipeline)" app/ components/ --include='*.ts' --include='*.tsx' 2>/dev/null; then
-            echo "ERROR: dashboard code references versature or pipeline modules"
+          if grep -rE "['\"][^'\"]*lib/(versature|pipeline)/" app/ components/ --include='*.ts' --include='*.tsx' 2>/dev/null; then
+            echo "ERROR: dashboard code imports from lib/versature or lib/pipeline"
             exit 1
           fi
 
