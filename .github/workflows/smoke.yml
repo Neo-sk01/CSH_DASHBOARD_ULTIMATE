@@ -1,0 +1,60 @@
+name: smoke
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # 09:00 UTC daily, 1h after pull.yml's nightly slot
+  pull_request:
+    paths:
+      - 'lib/**'
+      - 'jobs/**'
+      - 'scripts/**'
+      - 'package.json'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+
+      # Secrets flow through env: only — never interpolated into shell argv
+      # or JS template strings (process.env reads them at runtime).
+      - name: Reset smoke schema
+        run: npx tsx scripts/reset-smoke-schema.ts
+        env:
+          MOTHERDUCK_TOKEN_RW: ${{ secrets.MOTHERDUCK_TOKEN_SMOKE }}
+          MOTHERDUCK_DATABASE: csh_analytics_smoke
+
+      - run: npm run db:migrate
+        env:
+          MOTHERDUCK_TOKEN_RW: ${{ secrets.MOTHERDUCK_TOKEN_SMOKE }}
+          MOTHERDUCK_DATABASE: csh_analytics_smoke
+
+      - name: Smoke pull (yesterday)
+        run: |
+          PULL_WINDOW_START=$(date -u -d 'yesterday' +%Y-%m-%d)
+          export PULL_WINDOW_START
+          export PULL_WINDOW_END="$PULL_WINDOW_START"
+          npx tsx jobs/run-pull.ts
+        env:
+          VERSATURE_BASE_URL:      ${{ secrets.VERSATURE_BASE_URL }}
+          VERSATURE_CLIENT_ID:     ${{ secrets.VERSATURE_CLIENT_ID }}
+          VERSATURE_CLIENT_SECRET: ${{ secrets.VERSATURE_CLIENT_SECRET }}
+          VERSATURE_API_VERSION:   ${{ vars.VERSATURE_API_VERSION }}
+          MOTHERDUCK_TOKEN_RW:     ${{ secrets.MOTHERDUCK_TOKEN_SMOKE }}
+          MOTHERDUCK_DATABASE:     csh_analytics_smoke
+          QUEUE_EN_MAIN:           ${{ vars.QUEUE_EN_MAIN }}
+          QUEUE_FR_MAIN:           ${{ vars.QUEUE_FR_MAIN }}
+          QUEUE_AI_OVERFLOW_EN:    ${{ vars.QUEUE_AI_OVERFLOW_EN }}
+          QUEUE_AI_OVERFLOW_FR:    ${{ vars.QUEUE_AI_OVERFLOW_FR }}
+          TRACKED_DNIS:            ${{ vars.TRACKED_DNIS }}
+
+      - name: Assert success
+        run: npx tsx scripts/assert-smoke-success.ts
+        env:
+          MOTHERDUCK_TOKEN_RW: ${{ secrets.MOTHERDUCK_TOKEN_SMOKE }}
+          MOTHERDUCK_DATABASE: csh_analytics_smoke

@@ -1,0 +1,22 @@
+name: missing-nightly-run-check
+
+on:
+  schedule:
+    - cron: '0 10 * * *'  # 10:00 UTC daily, ~2h after pull.yml's nightly slot
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+
+      - name: Check for recent successful nightly pull
+        run: npx tsx scripts/check-missing-nightly.ts
+        env:
+          MOTHERDUCK_TOKEN_RW: ${{ secrets.MOTHERDUCK_TOKEN_RW }}
+          MOTHERDUCK_DATABASE: ${{ vars.MOTHERDUCK_DATABASE }}
+          ALERT_WEBHOOK_URL:   ${{ secrets.ALERT_WEBHOOK_URL }}
