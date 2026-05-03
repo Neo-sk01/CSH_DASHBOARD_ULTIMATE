@@ -1,0 +1,64 @@
+name: pull-versature
+
+on:
+  schedule:
+    # GH Actions cron is UTC. 08:00 UTC ≈ 04:00 EDT (summer) / 03:00 EST (winter).
+    - cron: '0 8 * * *'
+    - cron: '30 8 2 * *'
+  workflow_dispatch:
+    inputs:
+      windowStart:    { required: true,  type: string }
+      windowEnd:      { required: true,  type: string }
+      reason:         { required: false, type: string, default: 'manual' }
+      forceFinalize:  { required: false, type: boolean, default: false }
+  repository_dispatch:
+    types: [admin-pull]
+
+concurrency:
+  group: pull-versature
+  cancel-in-progress: false
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+
+      # All user-controlled inputs flow through env: only.
+      # The orchestrator script reads them via process.env — they are
+      # never interpolated into shell commands.
+      - name: Run pull
+        run: npx tsx jobs/run-pull.ts
+        env:
+          PULL_WINDOW_START:    ${{ github.event.inputs.windowStart   || github.event.client_payload.windowStart   || '' }}
+          PULL_WINDOW_END:      ${{ github.event.inputs.windowEnd     || github.event.client_payload.windowEnd     || '' }}
+          PULL_REASON:          ${{ github.event.inputs.reason        || github.event.client_payload.reason        || github.event_name }}
+          PULL_FORCE_FINALIZE:  ${{ github.event.inputs.forceFinalize || github.event.client_payload.forceFinalize || 'false' }}
+          PULL_TRIGGER:         ${{ github.event_name }}
+          PULL_SCHEDULE_CRON:   ${{ github.event.schedule }}
+          VERSATURE_BASE_URL:      ${{ secrets.VERSATURE_BASE_URL }}
+          VERSATURE_CLIENT_ID:     ${{ secrets.VERSATURE_CLIENT_ID }}
+          VERSATURE_CLIENT_SECRET: ${{ secrets.VERSATURE_CLIENT_SECRET }}
+          VERSATURE_API_VERSION:   ${{ vars.VERSATURE_API_VERSION }}
+          MOTHERDUCK_TOKEN_RW:     ${{ secrets.MOTHERDUCK_TOKEN_RW }}
+          MOTHERDUCK_DATABASE:     ${{ vars.MOTHERDUCK_DATABASE }}
+          QUEUE_EN_MAIN:           ${{ vars.QUEUE_EN_MAIN }}
+          QUEUE_FR_MAIN:           ${{ vars.QUEUE_FR_MAIN }}
+          QUEUE_AI_OVERFLOW_EN:    ${{ vars.QUEUE_AI_OVERFLOW_EN }}
+          QUEUE_AI_OVERFLOW_FR:    ${{ vars.QUEUE_AI_OVERFLOW_FR }}
+          TRACKED_DNIS:            ${{ vars.TRACKED_DNIS }}
+          ALERT_WEBHOOK_URL:       ${{ secrets.ALERT_WEBHOOK_URL }}
+
+      - if: failure()
+        name: Notify failure
+        run: npx tsx jobs/notify-failure.ts
+        env:
+          ALERT_WEBHOOK_URL:   ${{ secrets.ALERT_WEBHOOK_URL }}
+          PULL_RUN_LOG_URL:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MOTHERDUCK_TOKEN_RW: ${{ secrets.MOTHERDUCK_TOKEN_RW }}
+          MOTHERDUCK_DATABASE: ${{ vars.MOTHERDUCK_DATABASE }}

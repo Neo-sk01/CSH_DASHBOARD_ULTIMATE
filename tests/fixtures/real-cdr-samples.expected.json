@@ -1,0 +1,16 @@
+{
+  "_revision": "2",
+  "_revisionNote": "Per spec Revision 2, queue-bucket counts (english/french/ai/ai_overflow) are sourced from raw_queue_stats, NOT from logical_calls aggregation. This file now contains only CDR-derived counts (the canary for Task 14's build-logical-calls). For per-period queue bucket expected values, see queue-stats-samples.json + expected-snapshot.json.",
+  "sourceDate": "2026-04-16",
+  "sourceTimezone": "America/Toronto",
+  "timestampOffsetApplied": null,
+  "trackedDnisNormalized": ["6135949199"],
+  "totalSegments": 25,
+  "totalLogicalCallsBeforeFilter": 25,
+  "totalLogicalCallsAfterFilter": 17,
+  "_filterNote": "Stage 4 WHERE clause keeps only logical_calls where touched_dnis = true. Of the 25 distinct from_call_ids in this fixture, 17 have touched_dnis = true (their segments touched either the tracked DNIS in to.id or a tracked queue in to.user). The other 8 are excluded — they're internal calls captured incidentally in the sample.",
+  "totalIncoming": 17,
+  "_totalIncomingNote": "Equals count of logical_calls.touched_dnis = true. For this fixture's 25-segment subset (NOT a full-day count). The dashboard's daily total_incoming for 2026-04-16 would be much higher.",
+  "computedBy": "scripts/breakdown-cdr-samples.mjs (under Revision 2 build-logical-calls SQL). Operator should spot-check the 17/8 inclusion split before relying on the canary.",
+  "scriptAssistedBreakdown": true
+}

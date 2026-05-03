@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+
+      - name: Architectural lint (no Versature in dashboard)
+        run: |
+          if grep -r -E "(versature|pipeline)" app/ components/ --include='*.ts' --include='*.tsx' 2>/dev/null; then
+            echo "ERROR: dashboard code references versature or pipeline modules"
+            exit 1
+          fi
+
+      - run: npm run test:unit
+      - run: npm run test:integration
+      - run: npm run build

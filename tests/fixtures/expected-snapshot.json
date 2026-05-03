@@ -1,0 +1,24 @@
+{
+  "_purpose": "Expected daily kpi_snapshots row for 2026-04-16, computed by combining real-cdr-samples.ndjson (logical_calls source) and queue-stats-samples.json (queue bucket source) under the spec Revision 2 Stage 5 SQL.",
+  "_note": "Used as the canary in Task 15's build-snapshots tests. CDR fixture is a 25-segment subset (not full-day), so total_incoming reflects the subset (17 touched_dnis logical calls). Queue counts are full-day from the live tenant (queue_stats endpoint returns daily aggregates, not subset-able).",
+  "row": {
+    "period": "daily",
+    "period_start": "2026-04-16",
+    "period_end": "2026-04-16",
+    "include_weekends": true,
+    "total_incoming": 17,
+    "english_calls": 64,
+    "french_calls": 1,
+    "ai_calls": 36,
+    "ai_overflow_calls": 36,
+    "_aiOverflowCallsNote": "Per spec Revision 2: ai_overflow_calls = ai_calls for v1 (AI queues are overflow-only by tenant policy).",
+    "total_queue_activity": [
+      { "k": "8020", "v": 64 },
+      { "k": "8021", "v": 1 },
+      { "k": "8030", "v": 36 },
+      { "k": "8031", "v": 0 }
+    ],
+    "is_finalized": true,
+    "_isFinalizedNote": "2026-04-16 is more than 7 days before 2026-05-03, so falls into the finalized range."
+  }
+}

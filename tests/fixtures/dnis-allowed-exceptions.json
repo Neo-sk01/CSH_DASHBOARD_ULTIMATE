@@ -1,0 +1,37 @@
+{
+  "categories": {
+    "shortDigitOnly": "internal extensions or queue IDs (e.g. 40, 211, 8020)",
+    "sipPrefix": "values starting with sip:",
+    "anonymous": ["", "anonymous", "restricted", "private", "unknown"],
+    "internationalOrMalformed": "non-North-American numbers and numbers that don't parse as 10-digit NANP (observed in 30-day sample: Chinese mobile, UK mobile, malformed E.164, star codes)"
+  },
+  "patterns": [
+    "^\\d{1,9}$",
+    "^sip:",
+    "^(anonymous|restricted|private|unknown)$",
+    "^\\*",
+    "^\\+(?!1\\d{10}$).*$"
+  ],
+  "observedUnexpectedNulls": {
+    "description": "Values found in 30-day sample (2026-04-04 to 2026-05-03) that normalizeDnis() returns null for and do not match the original allowed patterns. These are internationally-formatted or malformed numbers — NOT Canadian DNIS values. Added to exception list rather than extending normalizeDnis() since these should not be normalised to 10-digit NANP.",
+    "values": [
+      "+141888086908",
+      "+8613823762554",
+      "+13339981",
+      "+1353856678350",
+      "+161324486206",
+      "*98",
+      "+4407707145050"
+    ],
+    "count": 7,
+    "resolution": "allowed-exception list extended; normalizeDnis() unchanged (correct behaviour: these are not NANP numbers)"
+  },
+  "gate5": {
+    "totalDistinctNonNullToIds": 1087,
+    "normalizedOk": 1075,
+    "allowedFail": 5,
+    "unexpectedNullsResolved": 7,
+    "finalUnresolvedCount": 0,
+    "pass": true
+  }
+}
