@@ -2,8 +2,8 @@ import './globals.css'
 import type { ReactNode } from 'react'
 
 export const metadata = {
-  title: 'CSH Dashboard',
-  description: 'CSH call analytics dashboard',
+  title: 'CSH Call Analytics',
+  description: 'Versature batch pipeline dashboard',
 }
 
 export default function RootLayout({ children }: { children: ReactNode }) {

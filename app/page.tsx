@@ -1,10 +1,43 @@
-export default function Page() {
+import { getSnapshot, getLatestSuccessfulPull, getMostRecentFinalizedDay } from '@/lib/warehouse/snapshots'
+import { resolvePeriodStart, type Period } from '@/lib/utils/dates'
+import { DashboardView } from '@/components/DashboardView'
+import { NotDownloadedYet } from '@/components/NotDownloadedYet'
+
+export const dynamic = 'force-dynamic'
+
+interface PageProps {
+  searchParams: Promise<{ period?: string; includeWeekends?: string }>
+}
+
+export default async function Page({ searchParams }: PageProps) {
+  const { period: periodParam, includeWeekends: incParam } = await searchParams
+  const period: Period = (periodParam as Period) ?? 'daily'
+  const includeWeekends = incParam === 'true'
+
+  const periodStart = resolvePeriodStart(period, new Date())
+  const [snapshot, latestPull, finalizedDay] = await Promise.all([
+    getSnapshot({ period, periodStart, includeWeekends }),
+    getLatestSuccessfulPull(),
+    getMostRecentFinalizedDay(),
+  ])
+
+  if (!snapshot) {
+    return (
+      <NotDownloadedYet
+        period={period}
+        periodStart={periodStart}
+        latestPullAt={latestPull?.finished_at ?? null}
+        finalizedDay={finalizedDay}
+      />
+    )
+  }
+
   return (
-    <main className="mx-auto max-w-7xl px-6 py-10">
-      <h1 className="text-3xl font-semibold tracking-tight">CSH Dashboard</h1>
-      <p className="mt-3 text-sm text-slate-600">
-        Part 1 scaffold complete. KPI implementation starts next.
-      </p>
-    </main>
+    <DashboardView
+      snapshot={snapshot}
+      period={period}
+      includeWeekends={includeWeekends}
+      latestPullAt={latestPull?.finished_at ?? null}
+    />
   )
 }
