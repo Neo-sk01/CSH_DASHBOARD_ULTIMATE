@@ -66,4 +66,39 @@ describe('rate limiter', () => {
     await wait
     expect(resolved).toBe(true)
   })
+
+  it('serializes concurrent acquires — no sub-second burst', async () => {
+    const T0 = 1_700_000_000_000
+    vi.setSystemTime(T0)
+    const resolveTimes: number[] = []
+    const promises = Array.from({ length: 5 }, () =>
+      acquire('cdrs').then(() => resolveTimes.push(Date.now() - T0)),
+    )
+    // 4 inter-call gaps of 200ms = 800ms; advance generously.
+    await vi.advanceTimersByTimeAsync(1_500)
+    await Promise.all(promises)
+    expect(resolveTimes).toEqual([0, 200, 400, 600, 800])
+  })
+
+  it('serializes concurrent acquires across the per-minute limit', async () => {
+    // Fire perMinute+1 concurrent CDR acquires (12+1 = 13).
+    const T0 = 1_700_000_000_000
+    vi.setSystemTime(T0)
+    const resolveTimes: number[] = []
+    const promises = Array.from({ length: 13 }, () =>
+      acquire('cdrs').then(() => resolveTimes.push(Date.now() - T0)),
+    )
+    // First 12 are spaced by 200ms → last finishes at 2200ms.
+    await vi.advanceTimersByTimeAsync(2_500)
+    // 13th must wait until oldest (slot 0 at t=0) ages out past 60s.
+    await vi.advanceTimersByTimeAsync(60_000)
+    await Promise.all(promises)
+    expect(resolveTimes.length).toBe(13)
+    // First 12 evenly spaced by 200ms.
+    for (let i = 1; i < 12; i++) {
+      expect(resolveTimes[i] - resolveTimes[i - 1]).toBe(200)
+    }
+    // 13th is past the 60s window from slot 0.
+    expect(resolveTimes[12]).toBeGreaterThan(60_000)
+  })
 })
