@@ -33,16 +33,16 @@ afterEach(() => {
 
 describe('request()', () => {
   it('passes Accept and Authorization headers', async () => {
-    let captured: Headers | null = null
+    const captured: { headers: Headers | null } = { headers: null }
     server.use(
       http.get('https://test.versature.com/api/cdrs/', ({ request }) => {
-        captured = request.headers
+        captured.headers = request.headers
         return HttpResponse.json([])
       }),
     )
     await request('cdrs', '/cdrs/?start_date=2026-04-30&end_date=2026-04-30')
-    expect(captured?.get('accept')).toBe('application/vnd.integrate.v1.10.0+json')
-    expect(captured?.get('authorization')).toBe('Bearer tok-1')
+    expect(captured.headers?.get('accept')).toBe('application/vnd.integrate.v1.10.0+json')
+    expect(captured.headers?.get('authorization')).toBe('Bearer tok-1')
   })
 
   it('on 401 invalidates the token, refreshes, retries once, then succeeds', async () => {
