@@ -114,7 +114,14 @@ This plan creates and modifies the following files. Each file has a single, name
 
 ## Task 0: Run verification scripts (HARD GATE)
 
-The spec defines six Task 0 gates (gates 1–5 are hard pass/fail; gate 6 is informational). None of the rest of the plan can proceed until each one is resolved. **Failure on a hard gate halts implementation until the design is updated** per the gate-specific failure decision in the spec.
+> **⚠️ Revision 2 update (2026-05-03):** Task 0 has been **executed once** against the live tenant. **Gate 2 failed** as the design feared possible — `to.user` is the segment's terminal destination, not its queue traversal. Per the spec's failure decision, the design has been redesigned: queue buckets now source from `raw_queue_stats` instead of `logical_calls`. Gate 2 is reframed as a regression guard. See the Revision 2 changelog at the top of the spec for the empirical evidence and the per-queue numbers.
+>
+> When re-executing this task, the implementer should:
+> - Use the same six gates below, but treat **Gate 2 as informational/regression-guard** (the build does NOT halt on Gate 2 failure — that decision was already made).
+> - Re-derive `tests/fixtures/real-cdr-samples.expected.json` under the new design: the `englishCalls`/`frenchCalls`/`aiCalls`/`aiOverflowCalls` counts now come from queue_stats fixtures (a separate `tests/fixtures/queue-stats-samples.json` file), not from logical_calls fixtures. Capture both sets in this task.
+> - Continue to commit `tests/fixtures/versature-task-0-results.json` with full per-queue Gate 2 numbers as the regression-guard baseline.
+
+The spec defines six Task 0 gates (gates 1–5 are hard pass/fail; gate 6 is informational). **Gate 2 is now reframed as a regression guard per the Revision 2 update above.** None of the rest of the plan can proceed until each one is resolved. **Failure on a hard gate (1, 3, 4, or 5) halts implementation until the design is updated** per the gate-specific failure decision in the spec.
 
 This task produces three artifacts that all must land in the same commit:
 1. `docs/versature-task-0-verification.md` — human-readable report with full audit metadata.
@@ -2251,11 +2258,23 @@ git commit -m "task-13: fetch-and-load Stages 1-3 with integration tests"
 
 ## Task 14: Build logical_calls (`lib/pipeline/build-logical-calls.ts`)
 
-This is the most important file in the pipeline. It groups CDR segments by `from_call_id` and applies the inclusion rule, bucket assignments, and tie-break logic.
+> **⚠️ Revision 2 update (2026-05-03):** The SQL and tests below are superseded. Task 0 Gate 2 proved that `to.user` is the segment's terminal destination, not its queue traversal — so `first_tracked_queue` and the four `is_*` bucket fields are no longer derived here. **Use the Stage 4 SQL from the spec at `docs/superpowers/specs/2026-05-02-versature-batch-pipeline-design.md`** (look for "Stage 4 — build `logical_calls`" under Pipeline Stages). Concretely:
+>
+> - `lib/warehouse/schema.sql` already has the OLD `logical_calls` columns; **add a migration step** to drop `touched_queues`, `first_tracked_queue`, `touched_ai`, `is_english`, `is_french`, `is_ai`, `is_ai_overflow` from the schema. Keep `from_call_id`, `call_date`, `caller_id`, `start_time`, `end_time`, `total_duration_seconds`, `segment_count`, `touched_dnis`, `rebuilt_at`, `pull_run_id`.
+> - The `build-logical-calls.ts` body becomes a single CTE (`inclusion`) that computes `touched_dnis` per `from_call_id` and a single SELECT that aggregates min/max/sum/count, filtered to `touched_dnis = true`.
+> - **Tests to KEEP:** 25 from_call_ids → 25 logical_calls collapse; DNIS in multiple formats included; bare 10-digit-different DNIS excluded; call with no DNIS and no tracked queue excluded; `total_duration_seconds` is the sum across segments; real-sample canary asserts `logicalCallCount` and `totalSegments` from `tests/fixtures/real-cdr-samples.expected.json` (per-bucket counts moved to Task 15).
+> - **Tests to DROP:** "English-then-AI overflow", "AI-only no overflow", "first_tracked_queue by start_time not lexicographic", same-`start_time` tie-break. Per-bucket assignment is no longer the responsibility of this module.
+>
+> The original (now stale) Revision 1 task text is preserved below for historical context only. **Do not implement what's below.** Write the simpler version per the spec.
 
 **Files:**
+- Modify: `lib/warehouse/schema.sql` (drop the 7 bucket-related columns from `logical_calls`)
 - Create: `lib/pipeline/build-logical-calls.ts`
 - Create: `tests/unit/build-logical-calls.test.ts`
+
+---
+
+**ORIGINAL REVISION 1 TASK (HISTORICAL — DO NOT IMPLEMENT):**
 
 - [ ] **Step 1: Write failing tests**
 
@@ -2583,9 +2602,25 @@ git commit -m "task-14: build-logical-calls Stage 4 with hand-crafted + real-sam
 
 Stage 5: rolls up `logical_calls` into daily/weekly/monthly snapshots with update-only-on-change and finalization rules.
 
+> **⚠️ Revision 2 update (2026-05-03):** Bucket counts (`english_calls`, `french_calls`, `ai_calls`, `ai_overflow_calls`) are now sourced from `raw_queue_stats.calls_offered`, NOT from aggregating `logical_calls`. **Use the Stage 5 SQL from the spec at `docs/superpowers/specs/2026-05-02-versature-batch-pipeline-design.md`** (look for "Stage 5 — build `kpi_snapshots`" under Pipeline Stages). Concretely:
+>
+> - `total_incoming` still comes from `logical_calls` (DNIS-derived, count where `touched_dnis = true`).
+> - `english_calls` = `SUM(calls_offered) WHERE queue_id = $QUEUE_EN_MAIN` from `raw_queue_stats` over the period.
+> - `french_calls` = same for `$QUEUE_FR_MAIN`.
+> - `ai_calls` = `SUM(calls_offered) WHERE queue_id IN ($AI_EN, $AI_FR)`.
+> - `ai_overflow_calls = ai_calls` for v1 (AI queues are overflow-only by tenant policy; per-call attribution is not derivable).
+> - `total_queue_activity` JSON unchanged.
+> - **Tests rework:** the `seedLogical` helper now seeds rows with only the kept columns (no `is_english`/`is_french`/etc.). Add a `seedQueueStats` helper (already in original task text) and use IT to drive the bucket assertions. Update-only-on-change behavior unchanged. Finalization rules unchanged. Real-sample canary asserts the bucket counts match `tests/fixtures/real-cdr-samples.expected.json` derived from queue_stats fixtures (Task 0 captures these too).
+>
+> The original (now stale) Revision 1 task text is preserved below for historical context only. **Do not implement what's below.** Write the new version per the spec's Stage 5 SQL.
+
 **Files:**
 - Create: `lib/pipeline/build-snapshots.ts`
 - Create: `tests/unit/build-snapshots.test.ts`
+
+---
+
+**ORIGINAL REVISION 1 TASK (HISTORICAL — DO NOT IMPLEMENT):**
 
 - [ ] **Step 1: Write failing tests**
 

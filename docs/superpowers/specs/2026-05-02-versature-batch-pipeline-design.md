@@ -1,8 +1,8 @@
 # Versature Batch Pipeline Design
 
-Date: 2026-05-02
+Date: 2026-05-02 (Revision 2: 2026-05-03)
 Project root: `/Users/neosekaleli/developer/neolore_codex_dahsboard/csh-dashboard`
-Status: Revision 1 — pending implementation planning
+Status: Revision 2 — partial implementation in progress on `feat/versature-pipeline` (Tasks 1–13 done)
 Author: Neo Sekaleli
 
 Supersedes:
@@ -12,6 +12,34 @@ Supersedes:
 The application described here is a **brand-new build**. Earlier specs are archived for context only. Where this spec conflicts with anything in the prior specs, this spec wins.
 
 ## Revision history
+
+### Revision 2 — 2026-05-03 (Queue attribution sourced from `queue_stats`)
+
+Task 0 Gate 2 (queue-touch inference) **failed** when run against the live tenant. Per-queue results on 2026-04-16:
+
+| Queue | Role | A (CDR `to.user` matches) | B (`calls_offered`) | diff | tolerance | Pass? |
+|---|---|---|---|---|---|---|
+| 8020 | English | 1 | 64 | 63 | 3.2 | ❌ |
+| 8030 | AI EN | 19 | 36 | 17 | 3 | ❌ |
+| 8021 | French | 0 | 1 | 1 | 3 | ✅ (low volume) |
+| 8031 | AI FR | 0 | 0 | 0 | 3 | ✅ (no traffic) |
+
+**Diagnosis:** the CDR `to.user` field shows the segment's **terminal destination**, not its queue traversal. For an answered call routed through queue 8020 to agent extension 53, the CDR shows `to.user = "53"`. Only abandoned/queue-terminated calls retain the queue ID in `to.user`. The "`to.user == queue_id` ⇒ touched that queue" assumption underlying Revision 1's `first_tracked_queue` derivation is **invalid**.
+
+A small Option 2 investigation confirmed there is no other CDR field carrying queue-route history (480-row sample showed only the documented 13 paths) and no per-call detail endpoint exposes queue lineage (probed `cdrs/{call_id}/`, `cdrs/{call_id}/segments`, `cdrs/{call_id}/route`, `cdrs/by_call_id/?call_id=…`, `call_history/{call_id}/`, `call_queues/{id}/calls/`, `call_queues/{id}/abandoned/` — all 404 or 422 on this tenant).
+
+**Resulting design changes (Option 3 — hybrid):**
+
+- **Queue bucket counts in `kpi_snapshots` are now sourced from `raw_queue_stats.calls_offered`, not from `logical_calls` aggregation.** `english_calls` = sum of `calls_offered` for the English queue across the period. Same for French and AI.
+- **`logical_calls` keeps `total_incoming`, caller, durations, segment count, and `touched_dnis`** — these are CDR-derived signals queue stats cannot provide. It loses `touched_queues`, `first_tracked_queue`, `touched_ai`, `is_english`, `is_french`, `is_ai`, `is_ai_overflow`. Queue attribution at the per-call level is no longer attempted; the per-call layer answers "did this caller reach our DNIS at all?", not "which queue did they go through?".
+- **`ai_overflow_calls` cannot be measured from the API.** Per-call queue lineage is required to detect "started in EN/FR, then went to AI" and that lineage is not exposed. For v1, `ai_overflow_calls` equals `ai_calls` with the documented assumption "AI queues are configured as overflow-only by tenant policy". If that assumption ceases to hold, the value becomes misleading; we surface this in the dashboard's footer text. A future Versature feature or a different data source (e.g. ConnectWise routing logs) could re-enable true overflow detection.
+- **Gate 2 (queue-touch inference) becomes a documented regression guard**, not a pre-build pass/fail. The `inspect-queue-shape.mjs` script and the captured 2026-04-16 numbers are committed as evidence of *why* CDR queue attribution is invalid. CI runs the script monthly to detect any future change in Versature's CDR semantics that might restore per-call attribution.
+- **The 8007 finding** (an extension that appears in 25 CDRs as `to.user` but is not in the configured tracked queues): treated as **unknown, not tracked**. Local evidence does not confirm it as a business queue. If Versature/admin confirms it later, it gets added to env vars (`QUEUE_8007_NAME=...`) with a named role.
+
+Other Revision 2 changes:
+- `queue_splits.perMinute` raised from 12 to 24 in `lib/versature/rate-limiter.ts` (Gate 3 calibration: 30 requests in 24.6s, zero 429s).
+- DNIS allowed-exception list extended with international/star-code patterns (Gate 5: 7 unexpected NULLs in 30-day sample, all non-NANP — added to exception list rather than extending the normalizer).
+- `from_call_id` uniqueness verified (Gate 4: 6,277 distinct IDs across 30 days, zero duplicates) — `from_call_id` PK retained.
 
 ### Revision 1 — 2026-05-02
 
@@ -195,6 +223,12 @@ CREATE TABLE IF NOT EXISTS raw_queue_splits (
 
 Derived from `raw_cdr_segments`. One row per `from_call_id`. Rebuilt for affected `call_date` ranges on every pull.
 
+**Revision 2 note:** queue-bucket fields (`touched_queues`, `first_tracked_queue`, `touched_ai`, `is_english`, `is_french`, `is_ai`, `is_ai_overflow`) are removed. Per-call queue attribution is not derivable from CDRs on this tenant — see the Revision 2 entry in the changelog. `logical_calls` now answers two questions only:
+1. Did this `from_call_id` reach our tracked DNIS? (`touched_dnis`)
+2. What's the caller, segment count, total duration, and time window? (CDR-only signals)
+
+Queue bucket counts come from `raw_queue_stats` and join in at Stage 5.
+
 ```sql
 CREATE TABLE IF NOT EXISTS logical_calls (
   from_call_id            VARCHAR PRIMARY KEY,
@@ -204,14 +238,7 @@ CREATE TABLE IF NOT EXISTS logical_calls (
   end_time                TIMESTAMP NOT NULL,      -- max(end_time)
   total_duration_seconds  INTEGER NOT NULL,        -- sum(duration_seconds) across segments
   segment_count           INTEGER NOT NULL,
-  touched_dnis            BOOLEAN NOT NULL,
-  touched_queues          VARCHAR[],               -- ordered tracked-queue IDs touched
-  first_tracked_queue     VARCHAR,                 -- earliest tracked queue, by start_time
-  touched_ai              BOOLEAN NOT NULL,
-  is_english              BOOLEAN NOT NULL,
-  is_french               BOOLEAN NOT NULL,
-  is_ai                   BOOLEAN NOT NULL,
-  is_ai_overflow          BOOLEAN NOT NULL,
+  touched_dnis            BOOLEAN NOT NULL,        -- Revision 2: kept; queue-touch fields removed
   rebuilt_at              TIMESTAMP NOT NULL,
   pull_run_id             VARCHAR NOT NULL
 );
@@ -245,14 +272,16 @@ The function is implemented as a DuckDB scalar UDF (registered at connection tim
 
 **Test fixtures must include format variants.** `tests/unit/build-logical-calls.test.ts` includes a fixture row per format above and asserts inclusion. A new test asserts that a DNIS that normalizes to a different number (e.g. `6135949198`) is excluded.
 
-**Bucket assignment.**
+**Bucket assignment** (Revision 2 — sourced from `raw_queue_stats`, NOT from `logical_calls`):
 
-- `is_english` — `first_tracked_queue = $QUEUE_EN_MAIN`
-- `is_french` — `first_tracked_queue = $QUEUE_FR_MAIN`
-- `is_ai` — `touched_ai` (the call touched `$QUEUE_AI_OVERFLOW_EN` or `$QUEUE_AI_OVERFLOW_FR` at any point)
-- `is_ai_overflow` — `touched_ai AND first_tracked_queue IN ($QUEUE_EN_MAIN, $QUEUE_FR_MAIN)`
+The four queue-bucket fields in `kpi_snapshots` are computed at Stage 5 by joining `raw_queue_stats` over the snapshot's date range. Per-call `first_tracked_queue` derivation is no longer attempted.
 
-`first_tracked_queue` is the queue from the segment with the **earliest `start_time`** whose `to_user` is in the tracked-queue set. When two such segments share the same `start_time`, the deterministic secondary sort key is `source_hash` (alphanumeric, ascending). This guarantees the same `first_tracked_queue` value across reruns regardless of how Versature pages happen to arrive.
+- `english_calls` — `SUM(calls_offered)` from `raw_queue_stats` where `queue_id = $QUEUE_EN_MAIN` over the period.
+- `french_calls` — `SUM(calls_offered)` where `queue_id = $QUEUE_FR_MAIN`.
+- `ai_calls` — `SUM(calls_offered)` where `queue_id IN ($QUEUE_AI_OVERFLOW_EN, $QUEUE_AI_OVERFLOW_FR)`.
+- `ai_overflow_calls` — equal to `ai_calls` for v1, with the documented assumption that AI queues are configured as overflow-only by tenant policy. Per-call attribution would be required to compute this distinctly (call started in EN/FR, then went to AI), and that attribution is not derivable from CDRs on this tenant. The dashboard footer surfaces this assumption to operators.
+
+The DNIS-based inclusion rule above stays as-is for `logical_calls` membership — it controls "did this call reach our DNIS at all?" and supplies `total_incoming`, total durations, and segment counts. The queue-touch term in the inclusion rule (`to_user IN (tracked queues)`) remains useful as a secondary inclusion path for calls that hit a tracked queue but not the DNIS directly (e.g. internal calls routed to the AI overflow); these are counted in `total_incoming` but not in the queue buckets, since the queue buckets come from `raw_queue_stats`.
 
 ### `kpi_snapshots`
 
@@ -462,6 +491,8 @@ await loadSplits(rows, pullRunId);
 
 ### Stage 4 — build `logical_calls`
 
+Revision 2: dramatically simplified. No queue-bucket derivation here; that moves to Stage 5 sourced from `raw_queue_stats`.
+
 ```sql
 DELETE FROM logical_calls WHERE call_date BETWEEN ? AND ?;
 
@@ -470,31 +501,15 @@ WITH segments AS (
   SELECT * FROM raw_cdr_segments
   WHERE call_date BETWEEN ? AND ?
 ),
-tracked_touch AS (
+inclusion AS (
   SELECT
     from_call_id,
-    list(to_user ORDER BY start_time)
-      FILTER (WHERE to_user IN ($EN, $FR, $AI_EN, $AI_FR))            AS touched_queues,
-    bool_or(to_user IN ($AI_EN, $AI_FR))                               AS touched_ai,
     bool_or(
       normalize_dnis(to_id) IN ($TRACKED_DNIS_NORMALIZED)
       OR to_user IN ($EN, $FR, $AI_EN, $AI_FR)
-    )                                                                  AS touched_dnis
+    ) AS touched_dnis
   FROM segments
   GROUP BY from_call_id
-),
-first_tracked AS (
-  SELECT from_call_id, to_user AS first_tracked_queue
-  FROM (
-    SELECT from_call_id, to_user,
-           row_number() OVER (
-             PARTITION BY from_call_id
-             ORDER BY start_time, source_hash             -- deterministic tie-break
-           ) AS rn
-    FROM segments
-    WHERE to_user IN ($EN, $FR, $AI_EN, $AI_FR)
-  )
-  WHERE rn = 1
 )
 SELECT
   s.from_call_id,
@@ -504,25 +519,18 @@ SELECT
   max(s.end_time)                                                       AS end_time,
   sum(s.duration_seconds)                                               AS total_duration_seconds,
   count(*)                                                              AS segment_count,
-  any_value(t.touched_dnis)                                             AS touched_dnis,
-  any_value(t.touched_queues)                                           AS touched_queues,
-  any_value(f.first_tracked_queue)                                      AS first_tracked_queue,
-  any_value(t.touched_ai)                                               AS touched_ai,
-  any_value(f.first_tracked_queue) = $EN                                AS is_english,
-  any_value(f.first_tracked_queue) = $FR                                AS is_french,
-  any_value(t.touched_ai)                                               AS is_ai,
-  any_value(t.touched_ai)
-    AND any_value(f.first_tracked_queue) IN ($EN, $FR)                  AS is_ai_overflow,
+  any_value(i.touched_dnis)                                             AS touched_dnis,
   now()                                                                 AS rebuilt_at,
   ?                                                                     AS pull_run_id
 FROM segments s
-JOIN tracked_touch t USING (from_call_id)
-LEFT JOIN first_tracked f USING (from_call_id)
-WHERE t.touched_dnis = true
+JOIN inclusion i USING (from_call_id)
+WHERE i.touched_dnis = true
 GROUP BY s.from_call_id;
 ```
 
 `DELETE` + `INSERT` runs in a single transaction so a partial failure doesn't leave orphan rows.
+
+The inclusion rule still considers tracked queues (`to_user IN ($EN, $FR, $AI_EN, $AI_FR)`) as a secondary path so calls that hit a tracked queue without crossing the public DNIS still land in `logical_calls` for `total_incoming` purposes. Per-call queue attribution is intentionally not derived here — it cannot be done correctly given the CDR shape (see Revision 2 changelog).
 
 ### Stage 5 — build `kpi_snapshots`
 
@@ -533,21 +541,30 @@ The compute uses **update-only-on-change**: a candidate row is constructed in a 
 The daily computation looks like this. (Weekly and monthly are structurally identical — only the `period`, `period_start`, `period_end`, and `WHERE call_date BETWEEN ...` differ.)
 
 ```sql
-WITH agg AS (
+-- Revision 2: queue buckets sourced from raw_queue_stats, not from logical_calls.
+-- total_incoming still comes from logical_calls (DNIS-derived).
+WITH dnis_total AS (
   SELECT
     call_date,
-    count(*)                                                 AS total_incoming,
-    count(*) FILTER (WHERE is_english)                       AS english_calls,
-    count(*) FILTER (WHERE is_french)                        AS french_calls,
-    count(*) FILTER (WHERE is_ai)                            AS ai_calls,
-    count(*) FILTER (WHERE is_ai_overflow)                   AS ai_overflow_calls
+    count(*) AS total_incoming
   FROM logical_calls
-  WHERE call_date BETWEEN ? AND ?
+  WHERE call_date BETWEEN ? AND ? AND touched_dnis = true
   GROUP BY call_date
 ),
+queue_buckets AS (
+  -- Sum calls_offered per queue across the snapshot's date range.
+  -- One row per business_date so this composes with dnis_total.
+  SELECT
+    business_date AS call_date,
+    sum(calls_offered) FILTER (WHERE queue_id = $EN)                AS english_calls,
+    sum(calls_offered) FILTER (WHERE queue_id = $FR)                AS french_calls,
+    sum(calls_offered) FILTER (WHERE queue_id IN ($AI_EN, $AI_FR))  AS ai_calls
+  FROM raw_queue_stats
+  WHERE business_date BETWEEN ? AND ?
+  GROUP BY business_date
+),
 queue_activity AS (
-  -- Deterministic JSON: build a sorted list of structs, then convert. json_group_object
-  -- does NOT guarantee key order; this pattern does.
+  -- Deterministic JSON: sorted list of {k, v} structs.
   SELECT
     business_date AS call_date,
     to_json(
@@ -557,22 +574,34 @@ queue_activity AS (
   WHERE business_date BETWEEN ? AND ?
   GROUP BY business_date
 ),
+all_dates AS (
+  -- Union of dates that appear in either source so we don't drop a
+  -- queue-busy / DNIS-quiet day or vice versa.
+  SELECT call_date FROM dnis_total
+  UNION
+  SELECT call_date FROM queue_buckets
+),
 candidate AS (
   SELECT
     'daily'                                                            AS period,
-    a.call_date                                                        AS period_start,
-    a.call_date                                                        AS period_end,
+    d.call_date                                                        AS period_start,
+    d.call_date                                                        AS period_end,
     ?                                                                  AS include_weekends,
-    a.total_incoming, a.english_calls, a.french_calls,
-    a.ai_calls, a.ai_overflow_calls,
+    coalesce(t.total_incoming, 0)                                      AS total_incoming,
+    coalesce(b.english_calls, 0)                                       AS english_calls,
+    coalesce(b.french_calls, 0)                                        AS french_calls,
+    coalesce(b.ai_calls, 0)                                            AS ai_calls,
+    -- ai_overflow_calls = ai_calls for v1 (AI queues are overflow-only by tenant policy).
+    -- See spec Revision 2 for why per-call attribution is not derivable.
+    coalesce(b.ai_calls, 0)                                            AS ai_overflow_calls,
     coalesce(q.total_queue_activity, '[]'::JSON)                       AS total_queue_activity,
-    -- Daily finalization: aged out of the rolling window AND not blocked by forceFinalize override.
-    -- Weekly/monthly substitute their own rules; see "Finalization rules" section.
-    (a.call_date < current_date - INTERVAL 7 DAY) OR ?::BOOLEAN        AS is_finalized,
+    (d.call_date < current_date - INTERVAL 7 DAY) OR ?::BOOLEAN        AS is_finalized,
     now()                                                              AS computed_at,
     ?                                                                  AS pull_run_id
-  FROM agg a
-  LEFT JOIN queue_activity q USING (call_date)
+  FROM all_dates d
+  LEFT JOIN dnis_total t      USING (call_date)
+  LEFT JOIN queue_buckets b   USING (call_date)
+  LEFT JOIN queue_activity q  USING (call_date)
 )
 INSERT OR REPLACE INTO kpi_snapshots
 SELECT c.* FROM candidate c
@@ -1059,20 +1088,25 @@ Run `scripts/inspect-cdr-shape.mjs` against **two sample dates**: one recent **h
 
 **If fail:** stop. Update the spec's "Tenant-Specific Facts" section and the parser before any downstream logic ships.
 
-#### 2. Queue-touch inference (most load-bearing)
+#### 2. Queue-touch inference (regression guard, no longer pre-build pass/fail)
 
-The design assumes `to.user == queue_id` means a segment touched that queue. Some segments have `to.user = '40'` (an internal extension) so the assumption is not trivially true.
+**Status as of Revision 2:** the original Gate 2 design (a pre-build pass/fail) **was run and failed.** Empirically, on this tenant CDR `to.user` shows the segment's terminal destination (typically the agent extension that answered), not the queue traversed. Per-call queue attribution is not derivable from CDRs. See the Revision 2 changelog at the top of this document for the per-queue evidence and the resulting design changes.
 
-The verification compares two counts for **the exact same date range, timezone, and tracked-queue set** that the production pipeline will use:
+The script and the comparison logic remain useful as a **regression guard**: if Versature ever changes CDR semantics so that `to.user` does start carrying queue identifiers reliably, the pipeline could be revised to support per-call queue attribution. The script is committed at `scripts/inspect-queue-shape.mjs`. CI runs it monthly.
 
-- **A:** count of distinct `from.call_id`s in the CDR feed where at least one segment has `to.user == queueId`, derived from `GET /cdrs/?start_date=DATE&end_date=DATE&limit=2000`.
-- **B:** the queue's own `calls_offered` from `GET /call_queues/{queue}/stats/?start_date=DATE&end_date=DATE`.
+**Comparison still computed:** for each tracked queue, the script emits
 
-**Pass criterion:** for **every** tracked queue, `abs(A - B) <= max(0.05 * B, 3)`. The absolute floor of 3 prevents a low-volume queue (12 calls) from failing on a 1-call discrepancy.
+- **A:** count of distinct `from.call_id`s in the CDR feed where at least one segment has `to.user == queueId`.
+- **B:** the queue's own `calls_offered` from `GET /call_queues/{queue}/stats/`.
 
-Report **per-queue accuracy** AND **aggregate accuracy across all four queues** in the verification artifacts.
+**Verdict logic:**
 
-**If fail:** **pause implementation and redesign queue attribution.** Do not proceed to pipeline build-out. The queue-touch inference is the load-bearing identification mechanism; if it's wrong, every KPI is wrong. Likely remediations: try a different `to.*` field, look for queue identifiers in `from.*`, or use a separate routing endpoint.
+- If `abs(A - B) <= max(0.05 * B, 3)` for every queue → log "queue-touch attribution viable on this tenant"; consider re-evaluating the design (the constraint that motivated Revision 2 may no longer apply).
+- If `abs(A - B) > max(0.05 * B, 3)` for any queue → log "queue-touch attribution NOT viable; queue buckets correctly sourced from raw_queue_stats" — this is the **expected** state; the regression guard is satisfied.
+
+The 2026-04-16 baseline measurements (Revision 2 changelog) are committed in `tests/fixtures/versature-task-0-results.json`. The monthly CI run compares against this baseline; a 2σ deviation triggers an investigation but not a build halt.
+
+**The original pre-build "pause-and-redesign" decision has already been executed in Revision 2.**
 
 #### 3. Splits endpoint rate limit (calibration, not pass/fail)
 
@@ -1176,7 +1210,7 @@ The two must agree before the expected file is committed. Any disagreement is it
 | Gate | If fail, then |
 |---|---|
 | 1 — Shape | Update parser before any downstream logic ships. |
-| 2 — Queue-touch | **Pause implementation. Redesign queue attribution.** |
+| 2 — Queue-touch | (Already failed in Rev 2 baseline; redesign executed.) Monthly regression guard: drift from baseline triggers investigation. |
 | 3 — Splits rate | Reduce concurrency / per-minute budget, or redesign split-fetch schedule. |
 | 4 — `from_call_id` uniqueness | Diagnose category first. Only true ID reuse triggers a PK change to `(from_call_id, call_date)`. |
 | 5 — DNIS coverage | Update `normalizeDnis()` OR extend allowed-exception list. |
