@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.4.7",
+  "checkpoint_id": "f101c768176b",
+  "strategy": "manual-commit",
+  "branch": "feat/versature-pipeline",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/superpowers/specs/2026-05-02-versature-batch-pipeline-design.md",
+    "lib/pipeline/build-logical-calls.ts",
+    "lib/pipeline/build-snapshots.ts",
+    "tests/fixtures/real-cdr-samples.expected.json",
+    "tests/unit/build-logical-calls.test.ts",
+    "tests/unit/build-snapshots.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f1/01c768176b/0/metadata.json",
+      "transcript": "/f1/01c768176b/0/full.jsonl",
+      "context": "",
+      "content_hash": "/f1/01c768176b/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}

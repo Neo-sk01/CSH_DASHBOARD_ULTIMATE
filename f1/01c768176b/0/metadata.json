@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.4.7",
+  "checkpoint_id": "f101c768176b",
+  "session_id": "c8e5d0a7-0fa5-4814-9936-c106f980f0b9",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-03T19:19:24.919904Z",
+  "branch": "feat/versature-pipeline",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/superpowers/specs/2026-05-02-versature-batch-pipeline-design.md",
+    "lib/pipeline/build-logical-calls.ts",
+    "lib/pipeline/build-snapshots.ts",
+    "tests/fixtures/real-cdr-samples.expected.json",
+    "tests/unit/build-logical-calls.test.ts",
+    "tests/unit/build-snapshots.test.ts"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "819b6be88c86",
+  "initial_attribution": {
+    "calculated_at": "2026-05-03T19:19:24.919111Z",
+    "agent_lines": 132,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 132,
+    "agent_percentage": 100
+  }
+}
