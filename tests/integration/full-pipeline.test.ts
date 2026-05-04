@@ -32,10 +32,12 @@ it('runs the full pipeline and produces a snapshot; re-run is byte-identical', a
     { duration: 30, answer_time: '2026-04-30T12:00:00', start_time: '2026-04-30T12:00:00', end_time: '2026-04-30T12:01:00', from: { call_id: 'cAi', name: null, id: '+15551234569', user: null, domain: null }, to: { call_id: null, id: '+16135949199', user: '8020', domain: 'neolore.com' } },
     { duration: 30, answer_time: '2026-04-30T12:01:30', start_time: '2026-04-30T12:01:30', end_time: '2026-04-30T12:02:00', from: { call_id: 'cAi', name: null, id: '+15551234569', user: null, domain: null }, to: { call_id: null, id: null,             user: '8030', domain: 'neolore.com' } },
   ]
+  // fetchCdrs sends one call per day with no `page` param; the mock returns the
+  // fixture once for the matching start_date (=window.start) and empty otherwise.
   server.use(
     http.get(`${BASE}/cdrs/`, ({ request }) => {
       const u = new URL(request.url)
-      return HttpResponse.json(Number(u.searchParams.get('page')) === 1 ? cdrs : [])
+      return HttpResponse.json(u.searchParams.get('start_date') === '2026-04-30' ? cdrs : [])
     }),
     http.get(`${BASE}/call_queues/:qid/stats/`, () => HttpResponse.json({ calls_offered: 1, abandoned_calls: 0, abandoned_rate: 0, average_talk_time: 60, average_handle_time: 60 })),
     http.get(`${BASE}/call_queues/:qid/reports/splits/`, () => HttpResponse.json({})),
