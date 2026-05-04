@@ -17,10 +17,17 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
 
-      - name: Architectural grep gate (no lib/versature or lib/pipeline imports in app/ or components/)
+      - name: Architectural grep gate (dashboard layer)
         run: |
           if grep -rE "['\"][^'\"]*lib/(versature|pipeline)/" app/ components/ --include='*.ts' --include='*.tsx' 2>/dev/null; then
             echo "ERROR: dashboard code imports from lib/versature or lib/pipeline"
+            exit 1
+          fi
+
+      - name: Architectural grep gate (warehouse reader layer)
+        run: |
+          if grep -rE "['\"][^'\"]*lib/(versature|pipeline)/" lib/warehouse/ --include='*.ts' 2>/dev/null; then
+            echo "ERROR: lib/warehouse imports from lib/versature or lib/pipeline (would create indirect dashboard->pipeline path)"
             exit 1
           fi
 

@@ -21,6 +21,14 @@ export async function getMostRecentFinalizedDay(): Promise<Date | string | null>
   return w.getMostRecentFinalizedDay()
 }
 
+export async function getMostRecentSnapshotPeriodStart(args: {
+  period: SnapshotRow['period']
+  includeWeekends: boolean
+}): Promise<Date | string | null> {
+  const w = await reader()
+  return w.getMostRecentSnapshotPeriodStart(args)
+}
+
 export async function getLatestSuccessfulPull(): Promise<PullRunRow | null> {
   const w = await reader()
   return w.getLatestSuccessfulPull()

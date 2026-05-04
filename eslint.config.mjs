@@ -26,6 +26,18 @@ const versatureForbidsWarehouse = {
   ],
 }
 
+const warehouseForbidsPipelineAndVersature = {
+  patterns: [
+    {
+      group: [
+        '@/lib/versature/*', '**/lib/versature/*', '../**/lib/versature/*',
+        '@/lib/pipeline/*',  '**/lib/pipeline/*',  '../**/lib/pipeline/*',
+      ],
+      message: 'lib/warehouse is the dashboard reader layer; it must not import lib/versature or lib/pipeline (architectural rule). Closes the indirect path app/** -> lib/warehouse -> lib/versature.',
+    },
+  ],
+}
+
 const config = [
   { ignores: ['.next/**', 'node_modules/**', 'tsconfig.tsbuildinfo'] },
   ...nextConfig,
@@ -39,6 +51,12 @@ const config = [
     files: ['lib/versature/**/*.ts'],
     rules: {
       'no-restricted-imports': ['error', versatureForbidsWarehouse],
+    },
+  },
+  {
+    files: ['lib/warehouse/**/*.ts'],
+    rules: {
+      'no-restricted-imports': ['error', warehouseForbidsPipelineAndVersature],
     },
   },
   {
