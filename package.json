@@ -11,7 +11,7 @@
     "test:integration": "vitest run --project integration",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit --project tsconfig.typecheck.json",
     "db:migrate": "node --env-file=.env.local --import tsx scripts/migrate.ts",
     "pull": "node --env-file=.env.local --import tsx jobs/run-pull.ts",
     "audit": "node --env-file=.env.local --import tsx scripts/audit-day.ts"
