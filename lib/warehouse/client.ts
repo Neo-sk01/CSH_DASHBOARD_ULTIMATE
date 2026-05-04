@@ -43,6 +43,7 @@ export type PullRunRow = {
 // lib/utils/dates.ts: formatDate / formatTimestamp.
 export interface WarehouseReader {
   getSnapshot(args: { period: SnapshotRow['period']; periodStart: string; includeWeekends: boolean }): Promise<SnapshotRow | null>
+  getMostRecentSnapshotPeriodStart(args: { period: SnapshotRow['period']; includeWeekends: boolean }): Promise<Date | string | null>
   getMostRecentFinalizedDay(): Promise<Date | string | null>
   getLatestSuccessfulPull(): Promise<PullRunRow | null>
   getRecentPullRuns(limit: number): Promise<PullRunRow[]>
@@ -96,6 +97,15 @@ export function wrap(db: Database): WarehouseWriter {
         period, periodStart, includeWeekends,
       )
       return (rows[0] as SnapshotRow | undefined) ?? null
+    },
+    async getMostRecentSnapshotPeriodStart({ period, includeWeekends }) {
+      const rows = await db.all(
+        `SELECT period_start FROM kpi_snapshots
+         WHERE period = ? AND include_weekends = ?
+         ORDER BY period_start DESC LIMIT 1`,
+        period, includeWeekends,
+      )
+      return ((rows[0] as { period_start?: Date | string } | undefined)?.period_start) ?? null
     },
     async getMostRecentFinalizedDay() {
       const rows = await db.all(

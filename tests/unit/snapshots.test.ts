@@ -26,6 +26,37 @@ it('getSnapshot disambiguates the weekend toggle', async () => {
   await db.close()
 })
 
+it('getMostRecentSnapshotPeriodStart returns the latest period_start for the matching period+includeWeekends (finalized or not)', async () => {
+  const db = await makeTestWarehouse()
+  // Older finalized + newer unfinalized of same period+includeWeekends → newer wins.
+  await db.run(
+    `INSERT INTO kpi_snapshots VALUES ('daily','2026-04-15','2026-04-15',true, 1,0,0,0,0,'[]'::JSON,true,now(),'r1')`,
+  )
+  await db.run(
+    `INSERT INTO kpi_snapshots VALUES ('daily','2026-04-30','2026-04-30',true, 1,0,0,0,0,'[]'::JSON,false,now(),'r1')`,
+  )
+  // Different includeWeekends bucket should be ignored.
+  await db.run(
+    `INSERT INTO kpi_snapshots VALUES ('daily','2026-05-01','2026-05-01',false, 1,0,0,0,0,'[]'::JSON,false,now(),'r1')`,
+  )
+  // Different period should be ignored.
+  await db.run(
+    `INSERT INTO kpi_snapshots VALUES ('weekly','2026-05-04','2026-05-10',true, 1,0,0,0,0,'[]'::JSON,false,now(),'r1')`,
+  )
+  const w = wrap(db)
+  const got = await w.getMostRecentSnapshotPeriodStart({ period: 'daily', includeWeekends: true })
+  const gotStr = got == null
+    ? null
+    : got instanceof Date
+      ? got.toISOString().slice(0, 10)
+      : got
+  expect(gotStr).toBe('2026-04-30')
+
+  const empty = await w.getMostRecentSnapshotPeriodStart({ period: 'monthly', includeWeekends: false })
+  expect(empty).toBeNull()
+  await db.close()
+})
+
 it('getMostRecentFinalizedDay returns the latest finalized daily period_start', async () => {
   const db = await makeTestWarehouse()
   await db.run(
