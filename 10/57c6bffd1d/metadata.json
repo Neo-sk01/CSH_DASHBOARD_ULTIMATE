@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.4.7",
+  "checkpoint_id": "1057c6bffd1d",
+  "strategy": "manual-commit",
+  "branch": "feat/versature-pipeline",
+  "checkpoints_count": 5,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "app/api/admin/pull/route.ts",
+    "app/api/health/freshness/route.ts",
+    "app/page.tsx",
+    "eslint.config.mjs",
+    "lib/warehouse/client.ts",
+    "lib/warehouse/snapshots.ts",
+    "tests/unit/admin-pull-route.test.ts",
+    "tests/unit/architecture-gate.test.ts",
+    "tests/unit/freshness-route.test.ts",
+    "tests/unit/snapshots.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/10/57c6bffd1d/0/metadata.json",
+      "transcript": "/10/57c6bffd1d/0/full.jsonl",
+      "context": "/10/57c6bffd1d/0/context.md",
+      "content_hash": "/10/57c6bffd1d/0/content_hash.txt",
+      "prompt": "/10/57c6bffd1d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2260,
+    "cache_creation_tokens": 489061,
+    "cache_read_tokens": 21324496,
+    "output_tokens": 111154,
+    "api_call_count": 145
+  }
+}

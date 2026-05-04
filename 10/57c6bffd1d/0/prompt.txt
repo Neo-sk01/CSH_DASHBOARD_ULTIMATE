@@ -1,0 +1,729 @@
+# Codex Adversarial Review
+
+Target: branch diff against 7a1d059
+Verdict: needs-attention
+
+No-ship: the client gives false confidence under concurrency and degraded Versature behavior, and one shipped quota is explicitly still unverified.
+
+Findings:
+- [high] Rate limiter releases concurrent bursts past the sub-second ceiling (lib/versature/rate-limiter.ts:33-52)
+  `acquire()` computes one sleep from the current `lastAt`, awaits it, then records the timestamp without rechecking or serializing. Parallel waiters after the first can all wake on the same timer and consume the remaining minute budget in one burst, violating the documented 5/s CDR and 10/s queue-stats ceilings even though the serial unit tests pass.
+  Recommendation: Make acquisition per-endpoint serialized, reserve the next allowed timestamp atomically before sleeping, and add `Promise.all` tests proving both per-second and per-minute limits hold under concurrent callers.
+- [high] Retries bypass the endpoint budget (lib/versature/client.ts:28-67)
+  The endpoint budget is acquired once before the retry loop. 401, 429, and 5xx retries continue directly to another `fetch`, so retries consume Versature calls without being counted by the limiter. A modest batch of initial requests that receives 5xxs can exceed the intended 12/min or 24/min budget inside the retry loop itself.
+  Recommendation: Acquire or reserve rate-limit capacity before every outbound attempt, including 401 refresh retries and 429/5xx retries, and test a retrying batch against the limiter.
+- [high] Transient network failures are not retried or bounded (lib/versature/client.ts:31-40)
+  The retry logic only runs after a `Response` exists. DNS/TLS resets, connection drops, stalled sockets, and other `fetch` rejections escape immediately with no backoff, and there is no timeout to stop a hung Versature call. This contradicts the intended 5xx/network-error retry behavior and can leave a nightly pull stuck or fail on a single transient transport fault.
+  Recommendation: Wrap `fetch` in a timeout-backed try/catch, classify transient network and timeout failures, retry them with jittered backoff under a total deadline, and wrap final failures in `VersatureError` with enough context to diagnose.
+- [medium] Token refresh stampedes under concurrent expiry (lib/versature/auth.ts:13-16)
+  `getAccessToken()` only caches the completed token; it does not cache an in-flight refresh promise. When the token is missing or inside the 60s refresh window, concurrent API calls will all enter `fetchNewToken()` before any one writes `cached`, multiplying OAuth token requests and making the 401 recovery path more fragile under load.
+  Recommendation: Add single-flight refresh state so concurrent callers await the same token request, and make 401 invalidation conditional on the token that actually failed so one stale response cannot clear a newer refresh.
+- [medium] Splits quota is shipping without the documented hard-gate evidence (lib/versature/rate-limiter.ts:8-11)
+  The `queue_splits` budget is hardcoded at 12/min while the code comment still says it is conservative until Task 0 verification. The repository context includes a Task 0 hard gate requiring a measured splits-limit run and a recorded result, but no such verification artifact is present. If the real splits endpoint limit is lower, this limiter will still drive the nightly job into 429s; if it is higher, the pull is needlessly slow and the number remains unauditable.
+  Recommendation: Run and commit the splits rate-limit verification, link the evidence near the budget, and make endpoint budgets operationally configurable so corrected limits do not require a code change.
+
+Next steps:
+- Fix limiter serialization and retry accounting before relying on these quotas.
+- Add transport timeout/network-error tests and concurrent limiter/token-refresh tests.
+
+---
+
+Base directory for this skill: /Users/neosekaleli/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.7/skills/receiving-code-review
+
+# Code Review Reception
+
+## Overview
+
+Code review requires technical evaluation, not emotional performance.
+
+**Core principle:** Verify before implementing. Ask before assuming. Technical correctness over social comfort.
+
+## The Response Pattern
+
+```
+WHEN receiving code review feedback:
+
+1. READ: Complete feedback without reacting
+2. UNDERSTAND: Restate requirement in own words (or ask)
+3. VERIFY: Check against codebase reality
+4. EVALUATE: Technically sound for THIS codebase?
+5. RESPOND: Technical acknowledgment or reasoned pushback
+6. IMPLEMENT: One item at a time, test each
+```
+
+## Forbidden Responses
+
+**NEVER:**
+- "You're absolutely right!" (explicit CLAUDE.md violation)
+- "Great point!" / "Excellent feedback!" (performative)
+- "Let me implement that now" (before verification)
+
+**INSTEAD:**
+- Restate the technical requirement
+- Ask clarifying questions
+- Push back with technical reasoning if wrong
+- Just start working (actions > words)
+
+## Handling Unclear Feedback
+
+```
+IF any item is unclear:
+  STOP - do not implement anything yet
+  ASK for clarification on unclear items
+
+WHY: Items may be related. Partial understanding = wrong implementation.
+```
+
+**Example:**
+```
+your human partner: "Fix 1-6"
+You understand 1,2,3,6. Unclear on 4,5.
+
+❌ WRONG: Implement 1,2,3,6 now, ask about 4,5 later
+✅ RIGHT: "I understand items 1,2,3,6. Need clarification on 4 and 5 before proceeding."
+```
+
+## Source-Specific Handling
+
+### From your human partner
+- **Trusted** - implement after understanding
+- **Still ask** if scope unclear
+- **No performative agreement**
+- **Skip to action** or technical acknowledgment
+
+### From External Reviewers
+```
+BEFORE implementing:
+  1. Check: Technically correct for THIS codebase?
+  2. Check: Breaks existing functionality?
+  3. Check: Reason for current implementation?
+  4. Check: Works on all platforms/versions?
+  5. Check: Does reviewer understand full context?
+
+IF suggestion seems wrong:
+  Push back with technical reasoning
+
+IF can't easily verify:
+  Say so: "I can't verify this without [X]. Should I [investigate/ask/proceed]?"
+
+IF conflicts with your human partner's prior decisions:
+  Stop and discuss with your human partner first
+```
+
+**your human partner's rule:** "External feedback - be skeptical, but check carefully"
+
+## YAGNI Check for "Professional" Features
+
+```
+IF reviewer suggests "implementing properly":
+  grep codebase for actual usage
+
+  IF unused: "This endpoint isn't called. Remove it (YAGNI)?"
+  IF used: Then implement properly
+```
+
+**your human partner's rule:** "You and reviewer both report to me. If we don't need this feature, don't add it."
+
+## Implementation Order
+
+```
+FOR multi-item feedback:
+  1. Clarify anything unclear FIRST
+  2. Then implement in this order:
+     - Blocking issues (breaks, security)
+     - Simple fixes (typos, imports)
+     - Complex fixes (refactoring, logic)
+  3. Test each fix individually
+  4. Verify no regressions
+```
+
+## When To Push Back
+
+Push back when:
+- Suggestion breaks existing functionality
+- Reviewer lacks full context
+- Violates YAGNI (unused feature)
+- Technically incorrect for this stack
+- Legacy/compatibility reasons exist
+- Conflicts with your human partner's architectural decisions
+
+**How to push back:**
+- Use technical reasoning, not defensiveness
+- Ask specific questions
+- Reference working tests/code
+- Involve your human partner if architectural
+
+**Signal if uncomfortable pushing back out loud:** "Strange things are afoot at the Circle K"
+
+## Acknowledging Correct Feedback
+
+When feedback IS correct:
+```
+✅ "Fixed. [Brief description of what changed]"
+✅ "Good catch - [specific issue]. Fixed in [location]."
+✅ [Just fix it and show in the code]
+
+❌ "You're absolutely right!"
+❌ "Great point!"
+❌ "Thanks for catching that!"
+❌ "Thanks for [anything]"
+❌ ANY gratitude expression
+```
+
+**Why no thanks:** Actions speak. Just fix it. The code itself shows you heard the feedback.
+
+**If you catch yourself about to write "Thanks":** DELETE IT. State the fix instead.
+
+## Gracefully Correcting Your Pushback
+
+If you pushed back and were wrong:
+```
+✅ "You were right - I checked [X] and it does [Y]. Implementing now."
+✅ "Verified this and you're correct. My initial understanding was wrong because [reason]. Fixing."
+
+❌ Long apology
+❌ Defending why you pushed back
+❌ Over-explaining
+```
+
+State the correction factually and move on.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Performative agreement | State requirement or just act |
+| Blind implementation | Verify against codebase first |
+| Batch without testing | One at a time, test each |
+| Assuming reviewer is right | Check if breaks things |
+| Avoiding pushback | Technical correctness > comfort |
+| Partial implementation | Clarify all items first |
+| Can't verify, proceed anyway | State limitation, ask for direction |
+
+## Real Examples
+
+**Performative Agreement (Bad):**
+```
+Reviewer: "Remove legacy code"
+❌ "You're absolutely right! Let me remove that..."
+```
+
+**Technical Verification (Good):**
+```
+Reviewer: "Remove legacy code"
+✅ "Checking... build target is 10.15+, this API needs 13+. Need legacy for backward compat. Current impl has wrong bundle ID - fix it or drop pre-13 support?"
+```
+
+**YAGNI (Good):**
+```
+Reviewer: "Implement proper metrics tracking with database, date filters, CSV export"
+✅ "Grepped codebase - nothing calls this endpoint. Remove it (YAGNI)? Or is there usage I'm missing?"
+```
+
+**Unclear Item (Good):**
+```
+your human partner: "Fix items 1-6"
+You understand 1,2,3,6. Unclear on 4,5.
+✅ "Understand 1,2,3,6. Need clarification on 4 and 5 before implementing."
+```
+
+## GitHub Thread Replies
+
+When replying to inline review comments on GitHub, reply in the comment thread (`gh api repos/{owner}/{repo}/pulls/{pr}/comments/{id}/replies`), not as a top-level PR comment.
+
+## The Bottom Line
+
+**External feedback = suggestions to evaluate, not orders to follow.**
+
+Verify. Question. Then implement.
+
+No performative agreement. Technical rigor always.
+
+---
+
+do the fixes mentioned in this review
+
+---
+
+Base directory for this skill: /Users/neosekaleli/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.7/skills/test-driven-development
+
+# Test-Driven Development (TDD)
+
+## Overview
+
+Write the test first. Watch it fail. Write minimal code to pass.
+
+**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.
+
+**Violating the letter of the rules is violating the spirit of the rules.**
+
+## When to Use
+
+**Always:**
+- New features
+- Bug fixes
+- Refactoring
+- Behavior changes
+
+**Exceptions (ask your human partner):**
+- Throwaway prototypes
+- Generated code
+- Configuration files
+
+Thinking "skip TDD just this once"? Stop. That's rationalization.
+
+## The Iron Law
+
+```
+NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST
+```
+
+Write code before the test? Delete it. Start over.
+
+**No exceptions:**
+- Don't keep it as "reference"
+- Don't "adapt" it while writing tests
+- Don't look at it
+- Delete means delete
+
+Implement fresh from tests. Period.
+
+## Red-Green-Refactor
+
+```dot
+digraph tdd_cycle {
+    rankdir=LR;
+    red [label="RED\nWrite failing test", shape=box, style=filled, fillcolor="#ffcccc"];
+    verify_red [label="Verify fails\ncorrectly", shape=diamond];
+    green [label="GREEN\nMinimal code", shape=box, style=filled, fillcolor="#ccffcc"];
+    verify_green [label="Verify passes\nAll green", shape=diamond];
+    refactor [label="REFACTOR\nClean up", shape=box, style=filled, fillcolor="#ccccff"];
+    next [label="Next", shape=ellipse];
+
+    red -> verify_red;
+    verify_red -> green [label="yes"];
+    verify_red -> red [label="wrong\nfailure"];
+    green -> verify_green;
+    verify_green -> refactor [label="yes"];
+    verify_green -> green [label="no"];
+    refactor -> verify_green [label="stay\ngreen"];
+    verify_green -> next;
+    next -> red;
+}
+```
+
+### RED - Write Failing Test
+
+Write one minimal test showing what should happen.
+
+<Good>
+```typescript
+test('retries failed operations 3 times', async () => {
+  let attempts = 0;
+  const operation = () => {
+    attempts++;
+    if (attempts < 3) throw new Error('fail');
+    return 'success';
+  };
+
+  const result = await retryOperation(operation);
+
+  expect(result).toBe('success');
+  expect(attempts).toBe(3);
+});
+```
+Clear name, tests real behavior, one thing
+</Good>
+
+<Bad>
+```typescript
+test('retry works', async () => {
+  const mock = jest.fn()
+    .mockRejectedValueOnce(new Error())
+    .mockRejectedValueOnce(new Error())
+    .mockResolvedValueOnce('success');
+  await retryOperation(mock);
+  expect(mock).toHaveBeenCalledTimes(3);
+});
+```
+Vague name, tests mock not code
+</Bad>
+
+**Requirements:**
+- One behavior
+- Clear name
+- Real code (no mocks unless unavoidable)
+
+### Verify RED - Watch It Fail
+
+**MANDATORY. Never skip.**
+
+```bash
+npm test path/to/test.test.ts
+```
+
+Confirm:
+- Test fails (not errors)
+- Failure message is expected
+- Fails because feature missing (not typos)
+
+**Test passes?** You're testing existing behavior. Fix test.
+
+**Test errors?** Fix error, re-run until it fails correctly.
+
+### GREEN - Minimal Code
+
+Write simplest code to pass the test.
+
+<Good>
+```typescript
+async function retryOperation<T>(fn: () => Promise<T>): Promise<T> {
+  for (let i = 0; i < 3; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (i === 2) throw e;
+    }
+  }
+  throw new Error('unreachable');
+}
+```
+Just enough to pass
+</Good>
+
+<Bad>
+```typescript
+async function retryOperation<T>(
+  fn: () => Promise<T>,
+  options?: {
+    maxRetries?: number;
+    backoff?: 'linear' | 'exponential';
+    onRetry?: (attempt: number) => void;
+  }
+): Promise<T> {
+  // YAGNI
+}
+```
+Over-engineered
+</Bad>
+
+Don't add features, refactor other code, or "improve" beyond the test.
+
+### Verify GREEN - Watch It Pass
+
+**MANDATORY.**
+
+```bash
+npm test path/to/test.test.ts
+```
+
+Confirm:
+- Test passes
+- Other tests still pass
+- Output pristine (no errors, warnings)
+
+**Test fails?** Fix code, not test.
+
+**Other tests fail?** Fix now.
+
+### REFACTOR - Clean Up
+
+After green only:
+- Remove duplication
+- Improve names
+- Extract helpers
+
+Keep tests green. Don't add behavior.
+
+### Repeat
+
+Next failing test for next feature.
+
+## Good Tests
+
+| Quality | Good | Bad |
+|---------|------|-----|
+| **Minimal** | One thing. "and" in name? Split it. | `test('validates email and domain and whitespace')` |
+| **Clear** | Name describes behavior | `test('test1')` |
+| **Shows intent** | Demonstrates desired API | Obscures what code should do |
+
+## Why Order Matters
+
+**"I'll write tests after to verify it works"**
+
+Tests written after code pass immediately. Passing immediately proves nothing:
+- Might test wrong thing
+- Might test implementation, not behavior
+- Might miss edge cases you forgot
+- You never saw it catch the bug
+
+Test-first forces you to see the test fail, proving it actually tests something.
+
+**"I already manually tested all the edge cases"**
+
+Manual testing is ad-hoc. You think you tested everything but:
+- No record of what you tested
+- Can't re-run when code changes
+- Easy to forget cases under pressure
+- "It worked when I tried it" ≠ comprehensive
+
+Automated tests are systematic. They run the same way every time.
+
+**"Deleting X hours of work is wasteful"**
+
+Sunk cost fallacy. The time is already gone. Your choice now:
+- Delete and rewrite with TDD (X more hours, high confidence)
+- Keep it and add tests after (30 min, low confidence, likely bugs)
+
+The "waste" is keeping code you can't trust. Working code without real tests is technical debt.
+
+**"TDD is dogmatic, being pragmatic means adapting"**
+
+TDD IS pragmatic:
+- Finds bugs before commit (faster than debugging after)
+- Prevents regressions (tests catch breaks immediately)
+- Documents behavior (tests show how to use code)
+- Enables refactoring (change freely, tests catch breaks)
+
+"Pragmatic" shortcuts = debugging in production = slower.
+
+**"Tests after achieve the same goals - it's spirit not ritual"**
+
+No. Tests-after answer "What does this do?" Tests-first answer "What should this do?"
+
+Tests-after are biased by your implementation. You test what you built, not what's required. You verify remembered edge cases, not discovered ones.
+
+Tests-first force edge case discovery before implementing. Tests-after verify you remembered everything (you didn't).
+
+30 minutes of tests after ≠ TDD. You get coverage, lose proof tests work.
+
+## Common Rationalizations
+
+| Excuse | Reality |
+|--------|---------|
+| "Too simple to test" | Simple code breaks. Test takes 30 seconds. |
+| "I'll test after" | Tests passing immediately prove nothing. |
+| "Tests after achieve same goals" | Tests-after = "what does this do?" Tests-first = "what should this do?" |
+| "Already manually tested" | Ad-hoc ≠ systematic. No record, can't re-run. |
+| "Deleting X hours is wasteful" | Sunk cost fallacy. Keeping unverified code is technical debt. |
+| "Keep as reference, write tests first" | You'll adapt it. That's testing after. Delete means delete. |
+| "Need to explore first" | Fine. Throw away exploration, start with TDD. |
+| "Test hard = design unclear" | Listen to test. Hard to test = hard to use. |
+| "TDD will slow me down" | TDD faster than debugging. Pragmatic = test-first. |
+| "Manual test faster" | Manual doesn't prove edge cases. You'll re-test every change. |
+| "Existing code has no tests" | You're improving it. Add tests for existing code. |
+
+## Red Flags - STOP and Start Over
+
+- Code before test
+- Test after implementation
+- Test passes immediately
+- Can't explain why test failed
+- Tests added "later"
+- Rationalizing "just this once"
+- "I already manually tested it"
+- "Tests after achieve the same purpose"
+- "It's about spirit not ritual"
+- "Keep as reference" or "adapt existing code"
+- "Already spent X hours, deleting is wasteful"
+- "TDD is dogmatic, I'm being pragmatic"
+- "This is different because..."
+
+**All of these mean: Delete code. Start over with TDD.**
+
+## Example: Bug Fix
+
+**Bug:** Empty email accepted
+
+**RED**
+```typescript
+test('rejects empty email', async () => {
+  const result = await submitForm({ email: '' });
+  expect(result.error).toBe('Email required');
+});
+```
+
+**Verify RED**
+```bash
+$ npm test
+FAIL: expected 'Email required', got undefined
+```
+
+**GREEN**
+```typescript
+function submitForm(data: FormData) {
+  if (!data.email?.trim()) {
+    return { error: 'Email required' };
+  }
+  // ...
+}
+```
+
+**Verify GREEN**
+```bash
+$ npm test
+PASS
+```
+
+**REFACTOR**
+Extract validation for multiple fields if needed.
+
+## Verification Checklist
+
+Before marking work complete:
+
+- [ ] Every new function/method has a test
+- [ ] Watched each test fail before implementing
+- [ ] Each test failed for expected reason (feature missing, not typo)
+- [ ] Wrote minimal code to pass each test
+- [ ] All tests pass
+- [ ] Output pristine (no errors, warnings)
+- [ ] Tests use real code (mocks only if unavoidable)
+- [ ] Edge cases and errors covered
+
+Can't check all boxes? You skipped TDD. Start over.
+
+## When Stuck
+
+| Problem | Solution |
+|---------|----------|
+| Don't know how to test | Write wished-for API. Write assertion first. Ask your human partner. |
+| Test too complicated | Design too complicated. Simplify interface. |
+| Must mock everything | Code too coupled. Use dependency injection. |
+| Test setup huge | Extract helpers. Still complex? Simplify design. |
+
+## Debugging Integration
+
+Bug found? Write failing test reproducing it. Follow TDD cycle. Test proves fix and prevents regression.
+
+Never fix bugs without a test.
+
+## Testing Anti-Patterns
+
+When adding mocks or test utilities, read @testing-anti-patterns.md to avoid common pitfalls:
+- Testing mock behavior instead of real behavior
+- Adding test-only methods to production classes
+- Mocking without understanding dependencies
+
+## Final Rule
+
+```
+Production code → test exists and failed first
+Otherwise → not TDD
+```
+
+No exceptions without your human partner's permission.
+
+---
+
+# Codex Adversarial Review
+
+Target: branch diff against b79b35e
+Verdict: needs-attention
+
+Do not ship. The revision violates its DNIS-only premise, corrupts non-daily rollups, and publishes hybrid/overflow assumptions without enforceable trust gates.
+
+Findings:
+- [high] logical_calls is still queue-derived, not DNIS-only (lib/pipeline/build-logical-calls.ts:33-39)
+  The inclusion CTE marks `touched_dnis` true when either `normalize_dnis(to_id)` matches or `to_user` is one of the tracked queues. That directly contradicts the Revision 2 premise of DNIS-only logical calls with no per-call queue derivation. Because Task 0 established `to.user` is a terminal destination, queue-only rows can enter `logical_calls` and then `kpi_snapshots.total_incoming`, polluting the source that is supposed to anchor total/dropped counts.
+  Recommendation: Remove the `to_user IN (...)` predicate from logical-call inclusion, make `touched_dnis` mean only normalized DNIS match, and update the queue-only test to assert exclusion. If queue-terminal diagnostics are needed, store them in a separate non-KPI field.
+- [high] Weekly and monthly snapshots are not aggregated (lib/pipeline/build-snapshots.ts:64-120)
+  For weekly/monthly candidates, `dnis_total` and `queue_buckets` are grouped by individual `call_date`, `all_dates` emits one row per day, and `candidate` assigns the same `(period, period_start, include_weekends)` key to every one of those rows. The `INSERT OR REPLACE` therefore writes multiple conflicting rows for one snapshot key, leaving one day's values rather than a period total, or depending on DuckDB conflict ordering. This silently corrupts weekly/monthly KPIs.
+  Recommendation: Collapse each candidate to exactly one row by summing `total_incoming`, language buckets, AI buckets, and queue activity across the full `periodStart..periodEnd` before inserting. Add multi-day weekly and monthly tests with asymmetric per-day counts.
+- [high] The hybrid drift gate is absent, so the 2% threshold has no effect (lib/pipeline/build-snapshots.ts:65-134)
+  Stage 5 combines `logical_calls` for `total_incoming` with `raw_queue_stats.calls_offered` for queue buckets, then inserts the snapshot without computing drift, recording review state, or affecting pull success. Under the Revision 2 hybrid, these sources are intentionally different units, so a vendor mapping change, missing queue stats, or DNIS ingestion error can publish as a successful snapshot with no trust signal. Any documented 2% threshold is currently not meaningful because it is neither enforced nor persisted.
+  Recommendation: Define the reconciliation calculation for the hybrid model, persist both source counts and drift, and fail or mark the pull/snapshot `review_required` when the threshold is exceeded until an audited approval exists.
+- [medium] ai_overflow_calls is asserted, not measured (lib/pipeline/build-snapshots.ts:106-110)
+  `ai_overflow_calls` is set to `coalesce(b.ai_calls, 0)`, making overflow identical to all AI queue traffic. That may match current tenant policy, but the code has no runtime assertion that AI queues are overflow-only and no audit trail if routing changes. A direct-to-AI campaign or queue repurpose would silently overstate overflow calls while every pipeline stage still succeeds.
+  Recommendation: Either rename the metric to `ai_calls`, make `ai_overflow_calls` nullable/unsupported until route evidence exists, or require an explicit checked configuration/tenant-policy assertion that is logged and covered by a regression guard.
+- [medium] forceFinalize overrides are not auditable (jobs/run-pull.ts:134-158)
+  The orchestrator passes `forceFinalize` into snapshot building and then closes the run as ordinary `success` with counts and optional `finalizedMonth`; it does not record that finalized data was overridden, why it was allowed, or what changed. That weakens the finalized-immutability guarantee: after a forced rewrite, operators can only infer intent from `pull_run_id`, not from a durable reason or delta.
+  Recommendation: Require an explicit force-finalize reason, detect finalized rows that will change before writing, and persist the reason plus before/after delta in `pull_runs.error_summary` or a dedicated override audit table. Reject force finalization for non-canonical/incomplete windows.
+
+Next steps:
+- Fix DNIS-only logical-call inclusion first; it is the anchor for every downstream trust check.
+- Add failing multi-day weekly/monthly snapshot tests before changing the rollup SQL.
+- Add an explicit drift/review model and an auditable force-finalize override path before treating snapshots as decision-grade.
+
+---
+
+What Revision 2 changed (per versature-task-0-verification.md:62-66) was the output — bucket counts now come from raw_queue_stats.calls_offered, and logical_calls dropped its bucket columns. The inclusion rule was not changed. The commit message phrase "DNIS-only inclusion" is the misleading bit; touched_dnis as a column name is also a slight misnomer.
+
+If you actually want strict DNIS-only inclusion, that's a spec change, not a bug fix. Want me to leave as-is, or change the spec + code?
+
+Finding 2 — weekly/monthly not aggregated (HIGH): valid, real bug.
+SQL groups dnis_total, queue_buckets, queue_activity by call_date, joins them per-day, then INSERTs N rows with the same (period, period_start, include_weekends) PK — INSERT OR REPLACE keeps only the last one. No existing test catches it (build-snapshots.test.ts only uses single-day windows). For a 7-day weekly snapshot this means we publish one day's data labeled as the week.
+
+This needs a fix. Plan: add multi-day weekly + monthly tests with asymmetric per-day counts, then collapse candidate into a single SUM aggregate over the whole period.
+
+Finding 3 — drift gate (HIGH): scope-expansion, not a bug.
+The "±2%" is a release/audit-script tolerance (plan.md:4010, design.md:1074) — a manual portal-vs-warehouse check. No runtime enforcement is in the spec. The kpi_snapshots schema has no review_required column. Adding a runtime drift gate + persisted drift + review_required state is a feature addition.
+
+The reviewer's underlying point — that DNIS total_incoming and queue calls_offered are different units and you have no runtime trust signal — is fair. But this is a design decision: do you want me to spec & build a runtime drift gate, or stick with the audit-script approach the design chose?
+
+Finding 4 — ai_overflow_calls (MEDIUM): documented design choice, not a bug.
+Task 0 explicitly says "ai_overflow_calls = ai_calls for v1 (AI queues are overflow-only by tenant policy)" — committed assumption, not an oversight. A regression guard (assert tenant policy hasn't changed) is a reasonable add but optional.
+
+Finding 5 — forceFinalize audit (MEDIUM): partially valid.
+cron-month-rollover triggers do leave a durable trail via pull_runs.triggered_by. But manual PULL_FORCE_FINALIZE=true via env var has no separate reason field or before/after delta. Adding a force_finalize_reason requirement + delta capture is a real improvement, but again a feature add.
+
+My recommendation: fix Finding 2 now (it's the only no-ship). Push back on 1 (matches spec). Park 3, 4, 5 as separate decisions you make about how strict v1 should be.
+
+Want me to:
+
+(a) just fix Finding 2 and write the code review reply pushing back on 1 + parking 3/4/5?
+(b) fix 2 and add the regression guard for 4 (cheap)?
+(c) fix everything, including the runtime drift gate and force-finalize audit (substantial scope)?
+
+explain these simply and how do they affect the overrall project , simplified language that will make me understand the scope
+
+---
+
+Finding 1 - follow the review's rule
+Finding 2- fix it since its a no-ship
+Finding 3- I am confident that no change will be made, if it is, we will cross that bridge when we get there
+Finding 4 - don't complicate it, keep it as it is 
+finding 5 - leave it if it is not a fundamental problem, if it is bring to my attention again
+
+The numbers should be accurate, if they are not . LET ME KNOW
+
+---
+
+Please commit as a seperate commit and push to main
+
+---
+
+b
+
+---
+
+# Codex Adversarial Review
+
+Target: branch diff against 42cd85a
+Verdict: needs-attention
+
+No-ship: the dashboard can default to an empty state even when fresh data exists, the privileged pull route lacks hard input validation, and the health/lint gates do not enforce the operational guarantees they claim.
+
+Findings:
+- [high] Dashboard defaults to a snapshot the pipeline does not normally create (app/page.tsx:14-23)
+  The root page ignores any requested date and always derives `periodStart` from `new Date()`. For the default `daily` view that means today's Toronto date, but the nightly pull window ends at yesterday, so the home page can show `Data not downloaded yet` while the latest available snapshot is actually present. This also leaves operators unable to inspect a rebuilt historical period from the UI.
+  Recommendation: Default to the latest available snapshot for the selected period, or accept and validate a `periodStart`/date selector. Add coverage that the default daily dashboard renders yesterday/latest data after a normal nightly pull.
+- [high] Privileged pull payload is cast, not validated (app/api/admin/pull/route.ts:19-50)
+  The route treats arbitrary JSON as the expected shape and then coerces `forceFinalize` with `Boolean(forceFinalize)`. A payload such as `"forceFinalize":"false"` dispatches as true, and malformed dates pass the `parseISO` checks because `Invalid Date` is never rejected. This can queue a backfill with unintended finalized-snapshot overwrite semantics or send invalid windows into the pipeline.
+  Recommendation: Validate with a runtime schema before dispatch: require canonical `YYYY-MM-DD` dates, reject invalid dates explicitly, require `forceFinalize` to be a real boolean, and preserve the boolean value without truthy coercion.
+- [medium] Freshness health stays green for stale or missing data (app/api/health/freshness/route.ts:8-15)
+  The endpoint returns the default 200 response when no finalized day exists and never compares `age_hours` to an allowed threshold. An uptime monitor will therefore report success as long as the DB query works, even if the pipeline has not finalized data for days.
+  Recommendation: Define a freshness SLO and return a failing status, such as 503, when no finalized day exists or the age exceeds the threshold. Include machine-readable `ok`, `max_age_hours`, and `checked_at` fields.
+- [medium] Architecture gate only blocks direct imports from app/components (eslint.config.mjs:32-36)
+  The ESLint rule is scoped to `app` and `components`, so it does not prevent an allowed dashboard helper such as `lib/warehouse/snapshots` from importing `lib/versature` or `lib/pipeline` later. The grep gate has the same direct-string limitation. Inference: this enforces import spelling at the first hop, not the actual invariant that dashboard reads cannot reach Versature.
+  Recommendation: Add layer rules for the allowed reader boundary itself, for example banning `lib/warehouse/**` read helpers from importing `lib/versature/**` or `lib/pipeline/**`, and add failing fixtures/tests that prove indirect and root/barrel paths are blocked.
+
+Next steps:
+- Block until dashboard snapshot selection uses latest available data or a validated date selector.
+- Add runtime schema validation to `/api/admin/pull` before GitHub dispatch.
+- Make freshness fail closed against stale/missing finalized data.
+- Tighten architecture enforcement beyond direct imports in `app` and `components`.
+
+---
+
+fix all 4

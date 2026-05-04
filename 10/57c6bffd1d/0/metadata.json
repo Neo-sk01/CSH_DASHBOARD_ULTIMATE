@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.4.7",
+  "checkpoint_id": "1057c6bffd1d",
+  "session_id": "c8e5d0a7-0fa5-4814-9936-c106f980f0b9",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-04T05:31:45.737183Z",
+  "branch": "feat/versature-pipeline",
+  "checkpoints_count": 5,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "app/api/admin/pull/route.ts",
+    "app/api/health/freshness/route.ts",
+    "app/page.tsx",
+    "eslint.config.mjs",
+    "lib/warehouse/client.ts",
+    "lib/warehouse/snapshots.ts",
+    "tests/unit/admin-pull-route.test.ts",
+    "tests/unit/architecture-gate.test.ts",
+    "tests/unit/freshness-route.test.ts",
+    "tests/unit/snapshots.test.ts"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "819b6be88c86",
+  "token_usage": {
+    "input_tokens": 2260,
+    "cache_creation_tokens": 489061,
+    "cache_read_tokens": 21324496,
+    "output_tokens": 111154,
+    "api_call_count": 145
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-04T05:31:45.564399Z",
+    "agent_lines": 430,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 430,
+    "agent_percentage": 100
+  }
+}
