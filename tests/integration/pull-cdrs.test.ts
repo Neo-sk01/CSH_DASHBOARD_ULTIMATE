@@ -34,15 +34,18 @@ function makeRow(callId: string, startTime: string, toUser: string | null, durat
 }
 
 describe('loadCdrs', () => {
-  it('paginates and writes all rows; re-running is a no-op', async () => {
-    const page1 = Array.from({ length: 500 }, (_, i) => makeRow(`c${i}`, '2026-04-30T12:00:00', '8020'))
-    const page2 = Array.from({ length: 200 }, (_, i) => makeRow(`c${500 + i}`, '2026-04-30T13:00:00', '8021'))
+  it('iterates day-by-day across the window and writes all rows; re-running is a no-op', async () => {
+    // Windows are inclusive [start, end]; fetchCdrs makes one API call per day with
+    // exclusive end_date `[day, day+1]`. Two days in the window → two calls. Each call
+    // is keyed on start_date in the mock (since `page` is no longer sent).
+    const day1 = Array.from({ length: 500 }, (_, i) => makeRow(`c${i}`, '2026-04-29T12:00:00', '8020'))
+    const day2 = Array.from({ length: 200 }, (_, i) => makeRow(`c${500 + i}`, '2026-04-30T13:00:00', '8021'))
     let calls = 0
     server.use(http.get(`${BASE}/cdrs/`, ({ request }) => {
       const u = new URL(request.url)
-      const page = Number(u.searchParams.get('page'))
+      const start = u.searchParams.get('start_date')
       calls += 1
-      return HttpResponse.json(page === 1 ? page1 : page === 2 ? page2 : [])
+      return HttpResponse.json(start === '2026-04-29' ? day1 : start === '2026-04-30' ? day2 : [])
     }))
 
     const db = await makeTestWarehouse()
@@ -50,7 +53,7 @@ describe('loadCdrs', () => {
     const count = await loadCdrs(w, {
       pullRunId: 'run-1',
       pulledAt: '2026-05-01T08:00:00Z',
-      window: { start: '2026-04-30', end: '2026-04-30' },
+      window: { start: '2026-04-29', end: '2026-04-30' },
     })
     expect(count).toBe(700)
     expect(calls).toBe(2)
@@ -61,7 +64,7 @@ describe('loadCdrs', () => {
     await loadCdrs(w, {
       pullRunId: 'run-2',
       pulledAt: '2026-05-01T08:05:00Z',
-      window: { start: '2026-04-30', end: '2026-04-30' },
+      window: { start: '2026-04-29', end: '2026-04-30' },
     })
     const rowCount2 = (await w.all<{ c: number }>('SELECT count(*) as c FROM raw_cdr_segments'))[0].c
     expect(Number(rowCount2)).toBe(700)
