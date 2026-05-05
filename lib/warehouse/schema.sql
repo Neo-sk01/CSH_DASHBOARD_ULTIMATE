@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS pull_runs (
   status              VARCHAR NOT NULL,                 -- 'running' | 'success' | 'partial_fetch' | 'partial_build' | 'failed'
   window_start        DATE NOT NULL,
   window_end          DATE NOT NULL,
+  reason              VARCHAR,
   cdr_segments_count  INTEGER,
   queue_stats_count   INTEGER,
   splits_count        INTEGER,
@@ -100,3 +101,5 @@ CREATE TABLE IF NOT EXISTS pull_runs (
   error_summary       VARCHAR,
   finalized_month     VARCHAR
 );
+
+ALTER TABLE pull_runs ADD COLUMN IF NOT EXISTS reason VARCHAR;

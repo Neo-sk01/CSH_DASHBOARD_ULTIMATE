@@ -68,11 +68,18 @@ describe('POST /api/admin/pull validation', () => {
   it('preserves forceFinalize=true (real boolean) and dispatches it through', async () => {
     const captured: CapturedDispatch = { payload: null }
     server.use(dispatchInterceptor(captured))
-    const res = await POST(makeRequest({ windowStart: '2026-04-29', windowEnd: '2026-04-30', forceFinalize: true, reason: 'rebuild' }))
+    const res = await POST(makeRequest({ windowStart: '2026-04-01', windowEnd: '2026-04-30', forceFinalize: true, reason: 'rebuild' }))
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.forceFinalize).toBe(true)
     expect((captured.payload as { client_payload: { forceFinalize: boolean } }).client_payload.forceFinalize).toBe(true)
+  })
+
+  it('rejects forceFinalize for a multi-day window that is not a complete week or month', async () => {
+    const res = await POST(makeRequest({ windowStart: '2026-04-29', windowEnd: '2026-04-30', forceFinalize: true, reason: 'partial override' }))
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(String(body.error)).toContain('forceFinalize')
   })
 
   it('preserves forceFinalize=false and dispatches it through', async () => {

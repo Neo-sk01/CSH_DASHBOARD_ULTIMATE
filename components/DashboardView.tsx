@@ -5,12 +5,12 @@ import { PeriodToggle } from './PeriodToggle'
 import { WeekendToggle } from './WeekendToggle'
 
 export function DashboardView({
-  snapshot, period, includeWeekends, latestPullAt,
+  snapshot, period, includeWeekends,
 }: {
   snapshot: SnapshotRow
   period: Period
   includeWeekends: boolean
-  latestPullAt: Date | string | null
+  latestPullAt?: Date | string | null
 }) {
   return (
     <main className="mx-auto max-w-6xl px-6 py-8">
@@ -20,7 +20,7 @@ export function DashboardView({
           <p className="mt-1 text-sm text-slate-600">
             Showing snapshot for {formatDate(snapshot.period_start)}{' '}
             ({snapshot.is_finalized ? 'finalized' : 'provisional'})
-            {' · '} pulled {formatTimestamp(latestPullAt)}
+            {' · '} computed {formatTimestamp(snapshot.computed_at)}
           </p>
         </div>
         <div className="flex flex-col items-end gap-2">

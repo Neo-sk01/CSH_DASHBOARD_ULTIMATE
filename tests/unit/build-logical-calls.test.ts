@@ -4,7 +4,7 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { Database } from 'duckdb-async'
 import { buildLogicalCalls } from '@/lib/pipeline/build-logical-calls'
-import { wrap } from '@/lib/warehouse/client'
+import { wrap, type WarehouseWriter } from '@/lib/warehouse/client'
 import { makeTestWarehouse } from '@/tests/helpers/test-warehouse'
 
 const QUEUES = { en: '8020', fr: '8021', aiEn: '8030', aiFr: '8031' }
@@ -126,6 +126,47 @@ describe('buildLogicalCalls (Revision 2)', () => {
     await buildLogicalCalls(w, { pullRunId: 'r2', window: { start: '2026-04-30', end: '2026-04-30' }, queues: QUEUES, trackedDnisNormalized: TRACKED_DNIS })
     const c = await w.one<{ c: number }>('SELECT count(*) as c FROM logical_calls')
     expect(Number(c?.c)).toBe(1)
+    await db.close()
+  })
+
+  it('keeps the existing logical-call window intact if the rebuild insert fails', async () => {
+    const db = await makeTestWarehouse()
+    await seed(db, [
+      { from_call_id: 'old', to_user: QUEUES.en, to_id: '+16135949199', start_time: '2026-04-30T09:00:00' },
+    ])
+    const real = wrap(db)
+    await buildLogicalCalls(real, {
+      pullRunId: 'old-run',
+      window: { start: '2026-04-30', end: '2026-04-30' },
+      queues: QUEUES,
+      trackedDnisNormalized: TRACKED_DNIS,
+    })
+
+    await seed(db, [
+      { from_call_id: 'new', to_user: QUEUES.en, to_id: '+16135949199', start_time: '2026-04-30T10:00:00' },
+    ])
+
+    const failingWriter: WarehouseWriter = {
+      ...real,
+      async exec(sql, params = []) {
+        if (sql.trim().startsWith('INSERT INTO logical_calls')) {
+          throw new Error('simulated insert failure')
+        }
+        await real.exec(sql, params)
+      },
+    }
+
+    await expect(buildLogicalCalls(failingWriter, {
+      pullRunId: 'new-run',
+      window: { start: '2026-04-30', end: '2026-04-30' },
+      queues: QUEUES,
+      trackedDnisNormalized: TRACKED_DNIS,
+    })).rejects.toThrow('simulated insert failure')
+
+    const ids = (await real.all<{ from_call_id: string; pull_run_id: string }>(
+      `SELECT from_call_id, pull_run_id FROM logical_calls ORDER BY from_call_id`,
+    ))
+    expect(ids).toEqual([{ from_call_id: 'old', pull_run_id: 'old-run' }])
     await db.close()
   })
 

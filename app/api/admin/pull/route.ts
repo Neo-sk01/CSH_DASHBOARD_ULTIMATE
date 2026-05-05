@@ -1,5 +1,15 @@
 import { NextResponse } from 'next/server'
-import { parseISO, isAfter, isValid, differenceInDays } from 'date-fns'
+import {
+  parseISO,
+  isAfter,
+  isValid,
+  differenceInDays,
+  startOfISOWeek,
+  endOfISOWeek,
+  startOfMonth,
+  endOfMonth,
+  format,
+} from 'date-fns'
 
 const MAX_WINDOW_DAYS = 90
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -41,6 +51,19 @@ function validateBody(body: unknown): { ok: true; value: ValidatedBody } | { ok:
   }
 }
 
+function isExactForceFinalizeWindow(windowStart: string, windowEnd: string): boolean {
+  if (windowStart === windowEnd) return true
+
+  const start = parseISO(windowStart)
+  const end = parseISO(windowEnd)
+  const isoWeek = format(startOfISOWeek(start), 'yyyy-MM-dd') === windowStart
+    && format(endOfISOWeek(start), 'yyyy-MM-dd') === windowEnd
+  const calendarMonth = format(startOfMonth(start), 'yyyy-MM-dd') === windowStart
+    && format(endOfMonth(start), 'yyyy-MM-dd') === windowEnd
+
+  return isoWeek || calendarMonth || format(start, 'yyyy-MM-dd') === format(end, 'yyyy-MM-dd')
+}
+
 export async function POST(req: Request) {
   const adminToken = process.env.ADMIN_PULL_TOKEN
   const ghToken = process.env.GH_DISPATCH_TOKEN
@@ -71,6 +94,12 @@ export async function POST(req: Request) {
   }
   if (differenceInDays(end, start) + 1 > MAX_WINDOW_DAYS) {
     return NextResponse.json({ error: `window exceeds ${MAX_WINDOW_DAYS} days` }, { status: 400 })
+  }
+  if (forceFinalize && !isExactForceFinalizeWindow(windowStart, windowEnd)) {
+    return NextResponse.json(
+      { error: 'forceFinalize requires a one-day, complete ISO week, or complete calendar month window' },
+      { status: 400 },
+    )
   }
 
   const dispatchRes = await fetch(`https://api.github.com/repos/${ghRepo}/dispatches`, {

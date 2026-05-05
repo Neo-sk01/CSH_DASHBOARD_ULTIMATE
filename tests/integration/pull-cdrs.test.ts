@@ -70,4 +70,21 @@ describe('loadCdrs', () => {
     expect(Number(rowCount2)).toBe(700)
     await db.close()
   })
+
+  it('fails the pull when a day reaches the Versature CDR limit', async () => {
+    const cappedDay = Array.from({ length: 1000 }, (_, i) => makeRow(`c${i}`, '2026-04-29T12:00:00', '8020'))
+    server.use(http.get(`${BASE}/cdrs/`, () => HttpResponse.json(cappedDay)))
+
+    const db = await makeTestWarehouse()
+    const w = wrap(db)
+    await expect(loadCdrs(w, {
+      pullRunId: 'run-truncated',
+      pulledAt: '2026-05-01T08:00:00Z',
+      window: { start: '2026-04-29', end: '2026-04-29' },
+    })).rejects.toThrow(/CDR.*limit|truncation/i)
+
+    const rowCount = (await w.all<{ c: number }>('SELECT count(*) as c FROM raw_cdr_segments'))[0].c
+    expect(Number(rowCount)).toBe(0)
+    await db.close()
+  })
 })

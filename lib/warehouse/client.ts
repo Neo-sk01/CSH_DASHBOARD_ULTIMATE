@@ -28,6 +28,7 @@ export type PullRunRow = {
   status: string
   window_start: Date | string
   window_end: Date | string
+  reason: string | null
   cdr_segments_count: number | null
   queue_stats_count: number | null
   splits_count: number | null

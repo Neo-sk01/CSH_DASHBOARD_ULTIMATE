@@ -1,21 +1,46 @@
+import { cookies } from 'next/headers'
 import { getRecentPullRuns } from '@/lib/warehouse/snapshots'
 import { formatDate } from '@/lib/utils/dates'
+import { ADMIN_SESSION_COOKIE, isValidAdminSessionValue } from '@/lib/admin/session'
 
 export const dynamic = 'force-dynamic'
 
-interface Props {
-  searchParams: Promise<{ token?: string }>
+function LoginForm() {
+  return (
+    <main className="mx-auto max-w-md px-6 py-16">
+      <h1 className="text-xl font-semibold">Admin</h1>
+      <form className="mt-6 space-y-4" method="post" action="/api/admin/session">
+        <label className="block text-sm font-medium text-slate-700" htmlFor="token">Admin token</label>
+        <input
+          id="token"
+          name="token"
+          type="password"
+          autoComplete="current-password"
+          className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+          required
+        />
+        <button className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white" type="submit">
+          Sign in
+        </button>
+      </form>
+    </main>
+  )
 }
 
-export default async function AdminPage({ searchParams }: Props) {
-  const { token } = await searchParams
-  if (!token || token !== process.env.ADMIN_PULL_TOKEN) {
+export default async function AdminPage() {
+  if (!process.env.ADMIN_DASHBOARD_TOKEN && !process.env.ADMIN_PULL_TOKEN) {
     return (
       <main className="mx-auto max-w-md px-6 py-16">
         <h1 className="text-xl font-semibold">Admin</h1>
-        <p className="mt-4 text-sm text-slate-600">Append <code>?token=YOUR_ADMIN_PULL_TOKEN</code> to access.</p>
+        <p className="mt-4 text-sm text-slate-600">Admin access is not configured.</p>
       </main>
     )
+  }
+
+  const cookieStore = await cookies()
+  const session = cookieStore.get(ADMIN_SESSION_COOKIE)?.value
+  if (!isValidAdminSessionValue(session)) {
+    return <LoginForm />
   }
 
   const runs = await getRecentPullRuns(20)
@@ -27,7 +52,7 @@ export default async function AdminPage({ searchParams }: Props) {
       <h2 className="mt-8 text-lg font-semibold">Recent pull runs</h2>
       <table className="mt-3 w-full text-sm">
         <thead><tr className="border-b text-left text-slate-500">
-          <th className="py-2">Run ID</th><th>Status</th><th>Window</th><th>Trigger</th><th>Counts</th>
+          <th className="py-2">Run ID</th><th>Status</th><th>Window</th><th>Trigger</th><th>Reason</th><th>Counts</th>
         </tr></thead>
         <tbody>
           {runs.map((r) => (
@@ -36,6 +61,7 @@ export default async function AdminPage({ searchParams }: Props) {
               <td>{r.status}</td>
               <td>{formatDate(r.window_start)} → {formatDate(r.window_end)}</td>
               <td>{r.triggered_by}</td>
+              <td>{r.reason ?? ''}</td>
               <td className="text-xs">cdr={r.cdr_segments_count} / lc={r.logical_calls_built} / snap={r.snapshots_built}</td>
             </tr>
           ))}

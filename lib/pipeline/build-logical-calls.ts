@@ -24,11 +24,10 @@ export async function buildLogicalCalls(
     }
   }
   const dnisList = args.trackedDnisNormalized.map((d) => `'${d}'`).join(',') || `''`
-
-  await w.exec(`DELETE FROM logical_calls WHERE call_date BETWEEN ? AND ?`, [args.window.start, args.window.end])
+  const tempTable = `logical_calls_rebuild_${args.pullRunId.replace(/[^A-Za-z0-9_]/g, '_') || 'run'}`
 
   await w.exec(`
-    INSERT INTO logical_calls
+    CREATE OR REPLACE TEMP TABLE ${tempTable} AS
     WITH segments AS (
       SELECT * FROM raw_cdr_segments
       WHERE call_date BETWEEN ? AND ?
@@ -56,6 +55,18 @@ export async function buildLogicalCalls(
     WHERE i.touched_dnis = true
     GROUP BY s.from_call_id
   `, [args.window.start, args.window.end, args.pullRunId])
+
+  await w.exec('BEGIN TRANSACTION')
+  try {
+    await w.exec(`DELETE FROM logical_calls WHERE call_date BETWEEN ? AND ?`, [args.window.start, args.window.end])
+    await w.exec(`INSERT INTO logical_calls SELECT * FROM ${tempTable}`)
+    await w.exec('COMMIT')
+  } catch (e) {
+    await w.exec('ROLLBACK').catch(() => {})
+    throw e
+  } finally {
+    await w.exec(`DROP TABLE IF EXISTS ${tempTable}`).catch(() => {})
+  }
 
   const c = await w.one<{ c: number }>(
     `SELECT count(*) as c FROM logical_calls WHERE call_date BETWEEN ? AND ?`,

@@ -20,6 +20,11 @@ interface SnapshotCandidate {
   includeWeekends: boolean
 }
 
+function coversCandidate(window: DateWindow, candidate: SnapshotCandidate): boolean {
+  return candidate.period === 'daily'
+    || (window.start <= candidate.periodStart && window.end >= candidate.periodEnd)
+}
+
 async function writeSnapshot(
   w: WarehouseWriter,
   candidate: SnapshotCandidate,
@@ -187,9 +192,14 @@ export async function buildSnapshots(w: WarehouseWriter, args: BuildSnapshotsArg
 
     for (const includeWeekends of [true, false]) {
       const wEnd = resolvePeriodEnd('weekly', wStart, includeWeekends)
+      const candidate = { period: 'weekly' as const, periodStart: wStart, periodEnd: wEnd, includeWeekends }
+      if (!coversCandidate(window, candidate)) {
+        log.info('build-snapshots: skipping partial period', { ...candidate, window })
+        continue
+      }
       const n = await writeSnapshot(
         w,
-        { period: 'weekly', periodStart: wStart, periodEnd: wEnd, includeWeekends },
+        candidate,
         queues,
         pullRunId,
         forceFinalize,
@@ -207,9 +217,14 @@ export async function buildSnapshots(w: WarehouseWriter, args: BuildSnapshotsArg
 
     for (const includeWeekends of [true, false]) {
       const mEnd = resolvePeriodEnd('monthly', mStart, includeWeekends)
+      const candidate = { period: 'monthly' as const, periodStart: mStart, periodEnd: mEnd, includeWeekends }
+      if (!coversCandidate(window, candidate)) {
+        log.info('build-snapshots: skipping partial period', { ...candidate, window })
+        continue
+      }
       const n = await writeSnapshot(
         w,
-        { period: 'monthly', periodStart: mStart, periodEnd: mEnd, includeWeekends },
+        candidate,
         queues,
         pullRunId,
         forceFinalize,

@@ -19,12 +19,14 @@ interface ResolvedWindow {
   end: string
   triggeredBy: TriggeredBy
   forceFinalize: boolean
+  reason: string
 }
 
 export function resolveWindow(env: NodeJS.ProcessEnv, now: Date = new Date()): ResolvedWindow {
   const start = env.PULL_WINDOW_START?.trim() || ''
   const end   = env.PULL_WINDOW_END?.trim()   || ''
   const trigger = env.PULL_TRIGGER || ''
+  const reason = env.PULL_REASON?.trim() || ''
   const cron = (env.PULL_SCHEDULE_CRON?.trim() || '').replace(/\s+/g, ' ')
   const force = env.PULL_FORCE_FINALIZE === 'true'
 
@@ -33,7 +35,7 @@ export function resolveWindow(env: NodeJS.ProcessEnv, now: Date = new Date()): R
       trigger === 'workflow_dispatch' ? 'manual' :
       trigger === 'repository_dispatch' ? 'admin' :
       'manual'
-    return { start, end, triggeredBy, forceFinalize: force }
+    return { start, end, triggeredBy, forceFinalize: force, reason: reason || trigger || triggeredBy }
   }
 
   if (!cron) {
@@ -45,14 +47,14 @@ export function resolveWindow(env: NodeJS.ProcessEnv, now: Date = new Date()): R
     const prevMonthAny = subDays(startOfMonth(today, { in: tz(TZ) }), 1)
     const ws = format(startOfMonth(prevMonthAny, { in: tz(TZ) }), 'yyyy-MM-dd', { in: tz(TZ) })
     const we = format(lastDayOfMonth(prevMonthAny, { in: tz(TZ) }),   'yyyy-MM-dd', { in: tz(TZ) })
-    return { start: ws, end: we, triggeredBy: 'cron-month-rollover', forceFinalize: true }
+    return { start: ws, end: we, triggeredBy: 'cron-month-rollover', forceFinalize: true, reason: reason || 'monthly rollover' }
   }
 
   if (cron === NIGHTLY_CRON) {
     const today = parseISO(format(now, 'yyyy-MM-dd', { in: tz(TZ) }))
     const ws = format(subDays(today, 7), 'yyyy-MM-dd')
     const we = format(subDays(today, 1), 'yyyy-MM-dd')
-    return { start: ws, end: we, triggeredBy: 'cron', forceFinalize: false }
+    return { start: ws, end: we, triggeredBy: 'cron', forceFinalize: false, reason: reason || 'nightly cron' }
   }
 
   throw new Error(`Wiring error: unrecognized PULL_SCHEDULE_CRON value '${cron}'`)
@@ -67,6 +69,7 @@ async function main() {
     triggeredBy: window.triggeredBy,
     windowStart: window.start,
     windowEnd: window.end,
+    reason: window.reason,
   })
 
   const queues = {
@@ -155,6 +158,7 @@ async function main() {
     cdrSegmentsCount: cdrCount, queueStatsCount: statsCount, splitsCount,
     logicalCallsBuilt: logicalCount, snapshotsBuilt: snapsCount,
     finalizedMonth,
+    errorSummary: window.forceFinalize ? `forceFinalize override: ${window.reason}` : undefined,
   })
   log.info('pull complete', { pullRunId, cdrCount, statsCount, splitsCount, logicalCount, snapsCount })
   await w.close()
