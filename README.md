@@ -155,9 +155,9 @@ is **immutable** unless an explicit `forceFinalize` overrides it:
 - **Weekly** snapshots auto-finalize when both `period_start` and
   `period_end` are `< current_date − 7 days`.
 - **Monthly** snapshots auto-finalize on the 2nd-of-month cron run.
-- Any trigger with `forceFinalize: true` writes `is_finalized = true`
-  unconditionally and logs the overriding `pull_run_id` in the audit
-  trail.
+- `forceFinalize: true` is accepted only for exact daily, ISO-week, or
+  calendar-month windows. The run records the overriding `pull_run_id`
+  and operator reason in the audit trail.
 
 This guarantees a finalized number quoted in a report on day N is the
 same number on day N+30.
@@ -166,8 +166,8 @@ same number on day N+30.
 
 ### Dashboard says "Data not downloaded yet" for a recent period
 
-1. Open `/admin?token=$ADMIN_PULL_TOKEN`. Find the most recent
-   `pull_runs` row for the affected window.
+1. Open `/admin` and sign in. Find the most recent `pull_runs` row for
+   the affected window.
 2. If the run is `partial_fetch` or `partial_build`, click through to
    the GitHub Actions log linked from the alert webhook (or visit the
    Actions tab directly).
@@ -192,8 +192,9 @@ Either:
   custom inputs).
 
 The 90-day cap is enforced by the admin route; longer backfills must
-be split into multiple admin pulls. The concurrency group serializes
-runs.
+be split into multiple admin pulls. `forceFinalize: true` must target
+one exact day, one complete ISO week, or one complete calendar month.
+The concurrency group serializes runs.
 
 ### Versature changed an API field
 
@@ -229,7 +230,9 @@ run picks them up. No code change needed.
 | `QUEUE_AI_OVERFLOW_EN` | pull job, audit | AI overflow EN queue ID, e.g. `8030` |
 | `QUEUE_AI_OVERFLOW_FR` | pull job, audit | AI overflow FR queue ID, e.g. `8031` |
 | `TRACKED_DNIS` | pull job | Comma-separated, e.g. `+16135949199,6135949199` |
-| `ADMIN_PULL_TOKEN` | dashboard | Bearer token for `/admin` and `/api/admin/pull` |
+| `ADMIN_DASHBOARD_TOKEN` | dashboard (optional) | Sign-in token for `/admin`; falls back to `ADMIN_PULL_TOKEN` when unset |
+| `ADMIN_SESSION_SECRET` | dashboard (optional) | HMAC secret for the `/admin` session cookie |
+| `ADMIN_PULL_TOKEN` | dashboard | Bearer token for `/api/admin/pull` |
 | `GH_DISPATCH_TOKEN` | dashboard | GitHub PAT with `repository_dispatch` scope on this repo |
 | `GH_REPO` | dashboard | `owner/repo` for the dispatch URL |
 | `ALERT_WEBHOOK_URL` | pull job | Slack/Teams incoming-webhook URL for failure alerts |
@@ -289,7 +292,8 @@ A push must clear all six gates to merge.
 ```
 app/                  Next.js app router (read-only — never imports lib/versature or lib/pipeline)
   page.tsx            Dashboard root (kpi_snapshots reader)
-  admin/              Token-gated admin page
+  admin/              Cookie-gated admin page
+  api/admin/session/  POST endpoint that sets the admin session cookie
   api/admin/pull/     POST endpoint that dispatches the pull workflow
   api/health/freshness/  GET endpoint for external uptime checks
 
@@ -331,8 +335,8 @@ These are deliberate non-goals — the v1 surface is intentionally small.
 - Per-queue dashboards (data is in the warehouse; surfacing it is a
   later dashboard-only PR).
 - Year-over-year deltas (need a full year of data first).
-- Self-service user accounts (admin gate is a single shared bearer
-  token).
+- Self-service user accounts (admin gate is a shared token-backed
+  session).
 - Real-time / sub-daily refresh.
 - Streaming CDR ingest (the API is poll-only).
 - ConnectWise ticket correlation — that is Part 2 of the dashboard

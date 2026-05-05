@@ -58,7 +58,6 @@ export default async function Page({ searchParams }: PageProps) {
       snapshot={snapshot}
       period={period}
       includeWeekends={includeWeekends}
-      latestPullAt={latestPull?.finished_at ?? null}
     />
   )
 }

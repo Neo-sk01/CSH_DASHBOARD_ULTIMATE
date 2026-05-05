@@ -8,15 +8,16 @@ export interface OpenRunArgs {
   triggeredBy: TriggeredBy
   windowStart: string
   windowEnd: string
+  reason?: string
 }
 
 export async function openPullRun(w: WarehouseWriter, args: OpenRunArgs): Promise<string> {
   const id = ulid()
   await w.exec(
     `INSERT INTO pull_runs
-       (pull_run_id, triggered_by, triggered_at, status, window_start, window_end)
-     VALUES (?, ?, now(), 'running', ?, ?)`,
-    [id, args.triggeredBy, args.windowStart, args.windowEnd],
+       (pull_run_id, triggered_by, triggered_at, status, window_start, window_end, reason)
+     VALUES (?, ?, now(), 'running', ?, ?, ?)`,
+    [id, args.triggeredBy, args.windowStart, args.windowEnd, args.reason?.trim() || null],
   )
   return id
 }

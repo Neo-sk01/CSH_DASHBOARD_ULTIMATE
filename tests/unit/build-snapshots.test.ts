@@ -144,6 +144,20 @@ describe('buildSnapshots (Revision 2)', () => {
     await db.close()
   })
 
+  it('does not write partial weekly or monthly snapshots from a one-day forceFinalize pull', async () => {
+    const db = await makeTestWarehouse()
+    await seedLogical(db, [{ from_call_id: 'a', call_date: '2026-03-15' }])
+    await seedQueueStats(db, [{ queue_id: '8020', business_date: '2026-03-15', calls_offered: 100 }])
+    const w = wrap(db)
+    await buildSnapshots(w, { pullRunId: 'rPartial', window: { start: '2026-03-15', end: '2026-03-15' }, forceFinalize: true, queues: QUEUES })
+
+    const periods = (await w.all<{ period: string }>(
+      `SELECT DISTINCT period FROM kpi_snapshots ORDER BY period`,
+    )).map((r) => r.period)
+    expect(periods).toEqual(['daily'])
+    await db.close()
+  })
+
   it('total_queue_activity JSON is sorted by queue_id', async () => {
     const db = await makeTestWarehouse()
     await seedLogical(db, [{ from_call_id: 'a', call_date: '2026-04-30' }])
@@ -192,7 +206,7 @@ describe('buildSnapshots (Revision 2)', () => {
     const w = wrap(db)
     await buildSnapshots(w, {
       pullRunId: 'r1',
-      window: { start: '2026-04-27', end: '2026-04-29' },
+      window: { start: '2026-04-27', end: '2026-05-03' },
       forceFinalize: true,
       queues: QUEUES,
     })
@@ -227,7 +241,7 @@ describe('buildSnapshots (Revision 2)', () => {
     const w = wrap(db)
     await buildSnapshots(w, {
       pullRunId: 'r1',
-      window: { start: '2026-04-02', end: '2026-04-29' },
+      window: { start: '2026-04-01', end: '2026-04-30' },
       forceFinalize: true,
       queues: QUEUES,
     })
@@ -251,7 +265,7 @@ describe('buildSnapshots (Revision 2)', () => {
     const w = wrap(db)
     await buildSnapshots(w, {
       pullRunId: 'r',
-      window: { start: '2026-04-27', end: '2026-04-29' },
+      window: { start: '2026-04-27', end: '2026-05-03' },
       forceFinalize: true,
       queues: QUEUES,
     })

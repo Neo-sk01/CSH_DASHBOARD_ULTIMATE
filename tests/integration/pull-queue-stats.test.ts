@@ -53,3 +53,38 @@ it('writes 4 queues x N business dates rows; re-pull updates in place', async ()
   expect(Number(total.o)).toBe(200)
   await db.close()
 })
+
+it('fails instead of writing zero KPIs when queue stats returns no row', async () => {
+  server.use(http.get(`${BASE}/call_queues/:qid/stats/`, () => HttpResponse.json([])))
+
+  const db = await makeTestWarehouse()
+  const w = wrap(db)
+  await expect(loadQueueStats(w, {
+    pullRunId: 'run-empty', pulledAt: '2026-05-01T08:00:00Z',
+    window: { start: '2026-04-27', end: '2026-04-27' },
+    queueIds: ['8020'],
+  })).rejects.toThrow(/queue stats.*empty|missing/i)
+
+  const total = (await w.all<{ c: number }>('SELECT count(*) as c FROM raw_queue_stats'))[0]
+  expect(Number(total.c)).toBe(0)
+  await db.close()
+})
+
+it('fails instead of coercing a missing calls_offered field to zero', async () => {
+  server.use(http.get(`${BASE}/call_queues/:qid/stats/`, () => HttpResponse.json({
+    abandoned_calls: 0, abandoned_rate: 0,
+    average_talk_time: 100, average_handle_time: 100,
+  })))
+
+  const db = await makeTestWarehouse()
+  const w = wrap(db)
+  await expect(loadQueueStats(w, {
+    pullRunId: 'run-missing-field', pulledAt: '2026-05-01T08:00:00Z',
+    window: { start: '2026-04-27', end: '2026-04-27' },
+    queueIds: ['8020'],
+  })).rejects.toThrow(/calls_offered|missing/i)
+
+  const total = (await w.all<{ c: number }>('SELECT count(*) as c FROM raw_queue_stats'))[0]
+  expect(Number(total.c)).toBe(0)
+  await db.close()
+})

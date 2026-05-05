@@ -16,13 +16,49 @@ import type { VersatureCdr, QueueStatsResponse, QueueSplitsResponse, DateWindow 
 //    is fetched as a separate single-day call.
 //
 // 3. `limit` caps at ~1000; values above ~1000 return 429. We use 1000 to maximize
-//    headroom for busy days. If a single day exceeds 1000 segments, this code
-//    cannot retrieve the rest and logs a warning — at that point the API design
-//    needs to change (cursor pagination, smaller windows, etc).
+//    headroom for busy days. If a single day reaches that limit, the response may
+//    be truncated, so the pull must fail rather than publishing undercounted KPIs.
 const CDR_DAILY_LIMIT = 1000
+const REQUIRED_QUEUE_STAT_FIELDS = [
+  'calls_offered',
+  'abandoned_calls',
+  'abandoned_rate',
+  'average_talk_time',
+  'average_handle_time',
+] as const
 
 function nextDay(dateStr: string): string {
   return format(addDays(parseISO(dateStr), 1), 'yyyy-MM-dd')
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function validateQueueStats(
+  queueId: string,
+  window: DateWindow,
+  stats: unknown,
+): QueueStatsResponse {
+  if (!isRecord(stats) || Object.keys(stats).length === 0) {
+    throw new Error(`queue stats response empty for queue ${queueId} ${window.start}..${window.end}`)
+  }
+
+  for (const field of REQUIRED_QUEUE_STAT_FIELDS) {
+    if (!(field in stats)) {
+      throw new Error(`queue stats response missing ${field} for queue ${queueId} ${window.start}..${window.end}`)
+    }
+    const value = stats[field]
+    if (field === 'calls_offered' || field === 'abandoned_calls') {
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        throw new Error(`queue stats response invalid ${field} for queue ${queueId} ${window.start}..${window.end}`)
+      }
+    } else if (value !== null && (typeof value !== 'number' || !Number.isFinite(value))) {
+      throw new Error(`queue stats response invalid ${field} for queue ${queueId} ${window.start}..${window.end}`)
+    }
+  }
+
+  return stats as QueueStatsResponse
 }
 
 export async function* fetchCdrs(window: DateWindow): AsyncIterable<VersatureCdr> {
@@ -32,10 +68,11 @@ export async function* fetchCdrs(window: DateWindow): AsyncIterable<VersatureCdr
       'cdrs',
       `/cdrs/?start_date=${day}&end_date=${exclusiveEnd}&limit=${CDR_DAILY_LIMIT}`,
     )
-    for (const row of rows) yield row
     if (rows.length >= CDR_DAILY_LIMIT) {
-      log.warn('fetchCdrs: day hit CDR_DAILY_LIMIT — possible truncation', { day, returned: rows.length })
+      log.error('fetchCdrs: day hit CDR_DAILY_LIMIT; aborting to avoid truncated KPIs', { day, returned: rows.length })
+      throw new Error(`CDR daily limit reached for ${day}; possible truncation`)
     }
+    for (const row of rows) yield row
   }
 }
 
@@ -48,10 +85,8 @@ export async function fetchQueueStats(queueId: string, window: DateWindow): Prom
     'queue_stats',
     `/call_queues/${queueId}/stats/?start_date=${window.start}&end_date=${exclusiveEnd}`,
   )
-  if (Array.isArray(result)) {
-    return result[0] ?? ({} as QueueStatsResponse)
-  }
-  return result
+  const stats = Array.isArray(result) ? result[0] : result
+  return validateQueueStats(queueId, window, stats)
 }
 
 export async function fetchQueueSplits(

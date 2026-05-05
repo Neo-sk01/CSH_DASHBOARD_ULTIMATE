@@ -3,7 +3,7 @@ import { wrap } from '@/lib/warehouse/client'
 import { makeTestWarehouse } from '@/tests/helpers/test-warehouse'
 import { buildSnapshots } from '@/lib/pipeline/build-snapshots'
 
-it('finalized monthly snapshot resists update without forceFinalize; forceFinalize overrides', async () => {
+it('finalized monthly snapshot only force-overrides when the pull covers the whole month', async () => {
   const db = await makeTestWarehouse()
   // Seed an old logical call (Revision 2 schema: 10 columns) + a finalized monthly snapshot that disagrees
   await db.run(`INSERT INTO logical_calls (
@@ -20,7 +20,12 @@ it('finalized monthly snapshot resists update without forceFinalize; forceFinali
   await buildSnapshots(w, { pullRunId: 'rNew', window: { start: '2026-03-15', end: '2026-03-15' }, forceFinalize: false, queues })
   const blocked = await w.one<{ ti: number; pid: string }>(`SELECT total_incoming as ti, pull_run_id as pid FROM kpi_snapshots WHERE period='monthly' AND period_start='2026-03-01' AND include_weekends=true`)
   expect(Number(blocked?.ti)).toBe(999)
-  await buildSnapshots(w, { pullRunId: 'rForce', window: { start: '2026-03-15', end: '2026-03-15' }, forceFinalize: true, queues })
+  await buildSnapshots(w, { pullRunId: 'rPartialForce', window: { start: '2026-03-15', end: '2026-03-15' }, forceFinalize: true, queues })
+  const stillBlocked = await w.one<{ ti: number; pid: string }>(`SELECT total_incoming as ti, pull_run_id as pid FROM kpi_snapshots WHERE period='monthly' AND period_start='2026-03-01' AND include_weekends=true`)
+  expect(Number(stillBlocked?.ti)).toBe(999)
+  expect(stillBlocked?.pid).toBe('old')
+
+  await buildSnapshots(w, { pullRunId: 'rForce', window: { start: '2026-03-01', end: '2026-03-31' }, forceFinalize: true, queues })
   const overridden = await w.one<{ ti: number; pid: string }>(`SELECT total_incoming as ti, pull_run_id as pid FROM kpi_snapshots WHERE period='monthly' AND period_start='2026-03-01' AND include_weekends=true`)
   expect(Number(overridden?.ti)).toBe(1)
   expect(overridden?.pid).toBe('rForce')
